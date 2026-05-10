@@ -15,6 +15,7 @@ type BaseConfig interface {
 	IsDevelopment() bool
 	IsTesting() bool
 	GetDBConfig() *gorm.Config
+	PaginateConfig() paginate.Config
 }
 
 type baseConfig struct{}
@@ -52,5 +53,13 @@ func (c *baseConfig) GetDBConfig() *gorm.Config {
 	return &gorm.Config{
 		Logger:         logger.Default.LogMode(logLevel),
 		TranslateError: true,
+	}
+}
+
+func (c *baseConfig) PaginateConfig() paginate.Config {
+	return paginate.Config{
+		DefaultSize:          10,
+		FieldSelectorEnabled: true,
+		ErrorEnabled:         true,
 	}
 }
