@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
 	"time"
+
+	"github.com/jszwec/csvutil"
+	"github.com/labstack/echo/v4"
 )
 
 type ApiResponse[T any] struct {
@@ -149,4 +154,30 @@ func (e *Event[T]) String() (string, error) {
 		return "", err
 	}
 	return string(bytes), nil
+}
+
+func NewCSVExport(ctx echo.Context, Result any, fileName string) error {
+	b, err := csvutil.Marshal(Result)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	ctx.Response().Header().Set(echo.HeaderContentType, "text/csv")
+	ctx.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf("attachment; filename=%s.csv", fileName))
+
+	tempFile, err := os.CreateTemp("", fileName+"*.csv")
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	defer os.Remove(tempFile.Name())
+
+	if _, err := tempFile.Write(b); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	if _, err := tempFile.Seek(0, 0); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return ctx.Stream(http.StatusOK, "text/csv", tempFile)
 }
