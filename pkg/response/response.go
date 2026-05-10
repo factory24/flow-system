@@ -156,6 +156,30 @@ func (e *Event[T]) String() (string, error) {
 	return string(bytes), nil
 }
 
+type ITCResponse struct {
+	MenuContent string `json:"menuContent"`
+	RequestType string `json:"requestType"`
+}
+
+func NewITCResponse(requestType string) *ITCResponse {
+	return &ITCResponse{
+		MenuContent: "",
+		RequestType: requestType,
+	}
+}
+
+type ArkeselResponse struct {
+	Message         string `json:"message"`
+	ContinueSession bool   `json:"continueSession"`
+}
+
+func NewArkeselResponse() *ArkeselResponse {
+	return &ArkeselResponse{
+		Message:         "",
+		ContinueSession: false,
+	}
+}
+
 func NewCSVExport(ctx echo.Context, Result any, fileName string) error {
 	b, err := csvutil.Marshal(Result)
 	if err != nil {
