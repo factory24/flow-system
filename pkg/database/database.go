@@ -41,7 +41,6 @@ func NewGormDatabase(config Config, models []interface{}) Connection {
 
 func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 	var d gorm.Dialector
-	var err error
 
 	dbType := os.Getenv("DB.TYPE")
 	if dbType == "" {

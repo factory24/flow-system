@@ -6,6 +6,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/go-playground/validator/v10 v10.30.2
 	github.com/joho/godotenv v1.5.1
+	github.com/jszwec/csvutil v1.10.0
 	github.com/labstack/echo/v4 v4.15.2
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/driver/sqlite v1.6.0
