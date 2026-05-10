@@ -46,8 +46,20 @@ func (c *baseConfig) IsTesting() bool {
 
 func (c *baseConfig) GetDBConfig() *gorm.Config {
 	logLevel := logger.Info
-	if c.IsProduction() {
+	envLogLevel := os.Getenv("DB_LOG_LEVEL")
+	switch envLogLevel {
+	case "silent":
 		logLevel = logger.Silent
+	case "error":
+		logLevel = logger.Error
+	case "warn":
+		logLevel = logger.Warn
+	case "info":
+		logLevel = logger.Info
+	default:
+		if c.IsProduction() && envLogLevel == "" {
+			logLevel = logger.Silent
+		}
 	}
 
 	return &gorm.Config{
