@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -14,6 +13,12 @@ import (
 
 type Config interface {
 	GetDBConfig() *gorm.Config
+	GetDBType() string
+	GetDBName() string
+	GetDBHost() string
+	GetDBPort() string
+	GetDBUser() string
+	GetDBPass() string
 }
 
 type Connection interface {
@@ -42,22 +47,19 @@ func NewGormDatabase(config Config, models []interface{}) Connection {
 func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 	var d gorm.Dialector
 
-	dbType := os.Getenv("DB.TYPE")
-	if dbType == "" {
-		dbType = "sqlite"
-	}
+	dbType := db.cfg.GetDBType()
 
 	switch dbType {
 	case "sqlite":
-		dbName := fmt.Sprintf("%s.db?parseTime=True", os.Getenv("DB.NAME"))
+		dbName := fmt.Sprintf("%s.db?parseTime=True", db.cfg.GetDBName())
 		d = sqlite.Open(dbName)
 	case "postgres":
 		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s",
-			os.Getenv("DB.HOST"),
-			os.Getenv("DB.USER"),
-			os.Getenv("DB.PASS"),
-			os.Getenv("DB.NAME"),
-			os.Getenv("DB.PORT"),
+			db.cfg.GetDBHost(),
+			db.cfg.GetDBUser(),
+			db.cfg.GetDBPass(),
+			db.cfg.GetDBName(),
+			db.cfg.GetDBPort(),
 		)
 		d = postgres.Open(dsn)
 	default:

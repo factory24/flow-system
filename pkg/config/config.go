@@ -1,10 +1,17 @@
 package config
 
 import (
+	"fmt"
 	"log"
+	"log/slog"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/joho/godotenv"
+	echolog "github.com/labstack/gommon/log"
+	"github.com/morkid/paginate"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -16,6 +23,25 @@ type BaseConfig interface {
 	IsTesting() bool
 	GetDBConfig() *gorm.Config
 	PaginateConfig() paginate.Config
+	GetLogLevel() string
+	GetEchoLogLevel() echolog.Lvl
+	GetAppPort() string
+	GetAppName() string
+	GetSentryDSN() string
+	GetAppEnv() string
+	GetKeycloakBaseURL() string
+	GetKeycloakRealm() string
+	GetKeycloakClientID() string
+	GetDBType() string
+	GetDBName() string
+	GetDBHost() string
+	GetDBPort() string
+	GetDBUser() string
+	GetDBPass() string
+	GetSentryConfig() sentry.ClientOptions
+	GetLogger() *slog.Logger
+	GetSlogLevel() slog.Level
+	GetServerAddr() string
 }
 
 type baseConfig struct{}
@@ -32,23 +58,81 @@ func (c *baseConfig) LoadEnv(filenames ...string) {
 	}
 }
 
+func (c *baseConfig) GetAppEnv() string {
+	env := os.Getenv("APP.ENV")
+	if env == "" {
+		return "development"
+	}
+	return env
+}
+
 func (c *baseConfig) IsProduction() bool {
-	return os.Getenv("APP.ENV") == "production"
+	return c.GetAppEnv() == "production"
 }
 
 func (c *baseConfig) IsDevelopment() bool {
-	return os.Getenv("APP.ENV") == "development" || os.Getenv("APP.ENV") == ""
+	return c.GetAppEnv() == "development"
 }
 
 func (c *baseConfig) IsTesting() bool {
-	return os.Getenv("APP.ENV") == "testing"
+	return c.GetAppEnv() == "testing"
+}
+
+func (c *baseConfig) GetLogLevel() string {
+	level := os.Getenv("LOG_LEVEL")
+	if level == "" {
+		level = "info"
+	}
+	return strings.ToLower(level)
+}
+
+func (c *baseConfig) GetEchoLogLevel() echolog.Lvl {
+	level := os.Getenv("ECHO_LOG_LEVEL")
+	if level == "" {
+		level = c.GetLogLevel()
+	}
+
+	switch level {
+	case "debug":
+		return echolog.DEBUG
+	case "info":
+		return echolog.INFO
+	case "warn":
+		return echolog.WARN
+	case "error":
+		return echolog.ERROR
+	case "off", "silent":
+		return echolog.OFF
+	default:
+		return echolog.INFO
+	}
+}
+
+func (c *baseConfig) GetSlogLevel() slog.Level {
+	level := c.GetLogLevel()
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func (c *baseConfig) GetDBConfig() *gorm.Config {
 	logLevel := logger.Info
 	envLogLevel := os.Getenv("DB_LOG_LEVEL")
+	if envLogLevel == "" {
+		envLogLevel = c.GetLogLevel()
+	}
+
 	switch envLogLevel {
-	case "silent":
+	case "silent", "off":
 		logLevel = logger.Silent
 	case "error":
 		logLevel = logger.Error
@@ -56,8 +140,10 @@ func (c *baseConfig) GetDBConfig() *gorm.Config {
 		logLevel = logger.Warn
 	case "info":
 		logLevel = logger.Info
+	case "debug":
+		logLevel = logger.Info
 	default:
-		if c.IsProduction() && envLogLevel == "" {
+		if c.IsProduction() && os.Getenv("DB_LOG_LEVEL") == "" && os.Getenv("LOG_LEVEL") == "" {
 			logLevel = logger.Silent
 		}
 	}
@@ -66,6 +152,95 @@ func (c *baseConfig) GetDBConfig() *gorm.Config {
 		Logger:         logger.Default.LogMode(logLevel),
 		TranslateError: true,
 	}
+}
+
+func (c *baseConfig) GetAppPort() string {
+	port := os.Getenv("APP.PORT")
+	if port == "" {
+		port = os.Getenv("PORT")
+	}
+	if port == "" {
+		port = "8080"
+	}
+	return port
+}
+
+func (c *baseConfig) GetAppName() string {
+	return os.Getenv("APP.NAME")
+}
+
+func (c *baseConfig) GetSentryDSN() string {
+	return os.Getenv("SENTRY.DSN")
+}
+
+func (c *baseConfig) GetKeycloakBaseURL() string {
+	return os.Getenv("KC.BASE_URL")
+}
+
+func (c *baseConfig) GetKeycloakRealm() string {
+	return os.Getenv("KC.REALM")
+}
+
+func (c *baseConfig) GetKeycloakClientID() string {
+	return os.Getenv("KC.CLIENT_ID")
+}
+
+func (c *baseConfig) GetDBType() string {
+	dbType := os.Getenv("DB.TYPE")
+	if dbType == "" {
+		dbType = "sqlite"
+	}
+	return dbType
+}
+
+func (c *baseConfig) GetDBName() string {
+	return os.Getenv("DB.NAME")
+}
+
+func (c *baseConfig) GetDBHost() string {
+	return os.Getenv("DB.HOST")
+}
+
+func (c *baseConfig) GetDBPort() string {
+	return os.Getenv("DB.PORT")
+}
+
+func (c *baseConfig) GetDBUser() string {
+	return os.Getenv("DB.USER")
+}
+
+func (c *baseConfig) GetDBPass() string {
+	return os.Getenv("DB.PASS")
+}
+
+func (c *baseConfig) GetSentryConfig() sentry.ClientOptions {
+	sentrySyncTransport := sentry.NewHTTPSyncTransport()
+	sentrySyncTransport.Timeout = time.Second * 3
+
+	return sentry.ClientOptions{
+		Dsn:              c.GetSentryDSN(),
+		TracesSampleRate: 1.0,
+		Debug:            c.IsDevelopment(),
+		AttachStacktrace: true,
+		ServerName:       c.GetAppName(),
+		Environment:      c.GetAppEnv(),
+		Transport:        sentrySyncTransport,
+		EnableTracing:    true,
+	}
+}
+
+func (c *baseConfig) GetLogger() *slog.Logger {
+	var handler slog.Handler
+	if c.IsProduction() {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+	}
+	return slog.New(handler)
+}
+
+func (c *baseConfig) GetServerAddr() string {
+	return fmt.Sprintf(":%s", c.GetAppPort())
 }
 
 func (c *baseConfig) PaginateConfig() paginate.Config {
