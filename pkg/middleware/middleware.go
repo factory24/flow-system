@@ -43,12 +43,18 @@ func New(app *echo.Echo) EchoMiddleware {
 }
 
 func (middleware *echoMiddleware) GetUserClaims(ctx echo.Context) *models.KeycloakUser {
+	if ctx == nil {
+		return nil
+	}
 	userClaim := ctx.Get("keycloakUser")
 	if userClaim == nil {
 		return nil
 	}
 
-	claims := userClaim.(*models.KeycloakUser)
+	claims, ok := userClaim.(*models.KeycloakUser)
+	if !ok {
+		return nil
+	}
 
 	if claims.Role != "" {
 		claims.IsStaff = true
@@ -57,6 +63,9 @@ func (middleware *echoMiddleware) GetUserClaims(ctx echo.Context) *models.Keyclo
 }
 
 func (middleware *echoMiddleware) GetAccessToken(ctx echo.Context) string {
+	if ctx == nil || ctx.Request() == nil {
+		return ""
+	}
 	rawAccessToken := ctx.Request().Header.Get("Authorization")
 	if rawAccessToken == "" {
 		return ""
