@@ -38,6 +38,7 @@ type BaseConfig interface {
 	GetDBPort() string
 	GetDBUser() string
 	GetDBPass() string
+	GetDBSSLMode() string
 	GetSentryConfig() sentry.ClientOptions
 	GetLogger() *slog.Logger
 	GetSlogLevel() slog.Level
@@ -149,8 +150,25 @@ func (c *baseConfig) GetDBConfig() *gorm.Config {
 	}
 
 	return &gorm.Config{
-		Logger:         logger.Default.LogMode(logLevel),
-		TranslateError: true,
+		SkipDefaultTransaction:                   false,
+		NamingStrategy:                           nil,
+		FullSaveAssociations:                     false,
+		Logger:                                   logger.Default.LogMode(logLevel),
+		NowFunc:                                  nil,
+		DryRun:                                   false,
+		PrepareStmt:                              false,
+		DisableAutomaticPing:                     false,
+		DisableForeignKeyConstraintWhenMigrating: false,
+		IgnoreRelationshipsWhenMigrating:         false,
+		DisableNestedTransaction:                 false,
+		AllowGlobalUpdate:                        false,
+		QueryFields:                              false,
+		CreateBatchSize:                          0,
+		TranslateError:                           true,
+		ClauseBuilders:                           nil,
+		ConnPool:                                 nil,
+		Dialector:                                nil,
+		Plugins:                                  nil,
 	}
 }
 
@@ -213,6 +231,14 @@ func (c *baseConfig) GetDBPass() string {
 	return os.Getenv("DB.PASS")
 }
 
+func (c *baseConfig) GetDBSSLMode() string {
+	sslMode := os.Getenv("DB.SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	return sslMode
+}
+
 func (c *baseConfig) GetSentryConfig() sentry.ClientOptions {
 	sentrySyncTransport := sentry.NewHTTPSyncTransport()
 	sentrySyncTransport.Timeout = time.Second * 3
@@ -231,10 +257,11 @@ func (c *baseConfig) GetSentryConfig() sentry.ClientOptions {
 
 func (c *baseConfig) GetLogger() *slog.Logger {
 	var handler slog.Handler
+	level := c.GetSlogLevel()
 	if c.IsProduction() {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
 	return slog.New(handler)
 }

@@ -19,6 +19,7 @@ type Config interface {
 	GetDBPort() string
 	GetDBUser() string
 	GetDBPass() string
+	GetDBSSLMode() string
 }
 
 type Connection interface {
@@ -28,19 +29,26 @@ type Connection interface {
 }
 
 type gormDB struct {
-	engine *gorm.DB
-	models []interface{}
-	cfg    Config
+	engine     *gorm.DB
+	models     []interface{}
+	cfg        Config
+	gormConfig *gorm.Config
 }
 
 func (db *gormDB) GetEngine() *gorm.DB {
 	return db.engine
 }
 
-func NewGormDatabase(config Config, models []interface{}) Connection {
+func NewGormDatabase(config Config, models []interface{}, gormConfigs ...*gorm.Config) Connection {
+	var gormConfig *gorm.Config
+	if len(gormConfigs) > 0 {
+		gormConfig = gormConfigs[0]
+	}
+
 	return &gormDB{
-		cfg:    config,
-		models: models,
+		cfg:        config,
+		models:     models,
+		gormConfig: gormConfig,
 	}
 }
 
@@ -54,12 +62,13 @@ func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 		dbName := fmt.Sprintf("%s.db?parseTime=True", db.cfg.GetDBName())
 		d = sqlite.Open(dbName)
 	case "postgres":
-		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s",
+		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
 			db.cfg.GetDBHost(),
 			db.cfg.GetDBUser(),
 			db.cfg.GetDBPass(),
 			db.cfg.GetDBName(),
 			db.cfg.GetDBPort(),
+			db.cfg.GetDBSSLMode(),
 		)
 		d = postgres.Open(dsn)
 	default:
@@ -80,9 +89,14 @@ func (db *gormDB) Connect() {
 	}
 
 	for {
-		c, err := gorm.Open(dialect, db.cfg.GetDBConfig())
+		gormConfig := db.gormConfig
+		if gormConfig == nil {
+			gormConfig = db.cfg.GetDBConfig()
+		}
+
+		c, err := gorm.Open(dialect, gormConfig)
 		if err != nil {
-			log.Printf("%s DB not yet ready to connect! Attempt %d", dbType, counts+1)
+			log.Printf("%s DB not yet ready to connect! Attempt %d. Error: %v", dbType, counts+1, err)
 			counts++
 		} else {
 			connection = c
@@ -90,7 +104,7 @@ func (db *gormDB) Connect() {
 		}
 
 		if counts > 5 {
-			log.Fatalf("failed to connect to %s database after 5 attempts: %v", dbType, err)
+			log.Fatalf("failed to connect to %s database after 5 attempts", dbType)
 		}
 
 		backOff = time.Duration(math.Pow(float64(counts), 2)) * time.Second
