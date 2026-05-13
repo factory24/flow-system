@@ -62,14 +62,17 @@ func (db *gormDB) getDialect() (gorm.Dialector, string, error) {
 		dbName := fmt.Sprintf("%s.db?parseTime=True", db.cfg.GetDBName())
 		d = sqlite.Open(dbName)
 	case "postgres":
-		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
+		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s",
 			db.cfg.GetDBHost(),
 			db.cfg.GetDBUser(),
 			db.cfg.GetDBPass(),
 			db.cfg.GetDBName(),
 			db.cfg.GetDBPort(),
-			db.cfg.GetDBSSLMode(),
 		)
+
+		if db.cfg.GetDBSSLMode() != "" {
+			dsn = fmt.Sprintf("%s sslmode=%s", dsn, db.cfg.GetDBSSLMode())
+		}
 		d = postgres.Open(dsn)
 	default:
 		return nil, "", fmt.Errorf("unsupported database type: %s", dbType)
@@ -88,8 +91,13 @@ func (db *gormDB) Connect() {
 		log.Fatalf("failed to get db dialect: %v", err)
 	}
 
+	sslMode := db.cfg.GetDBSSLMode()
+	if sslMode == "" {
+		sslMode = "default (prefer)"
+	}
+
 	log.Printf("Connecting to %s database at %s:%s (name: %s, user: %s, sslmode: %s)...",
-		dbType, db.cfg.GetDBHost(), db.cfg.GetDBPort(), db.cfg.GetDBName(), db.cfg.GetDBUser(), db.cfg.GetDBSSLMode())
+		dbType, db.cfg.GetDBHost(), db.cfg.GetDBPort(), db.cfg.GetDBName(), db.cfg.GetDBUser(), sslMode)
 
 	for {
 		gormConfig := db.gormConfig

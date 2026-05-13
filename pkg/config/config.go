@@ -234,11 +234,7 @@ func (c *baseConfig) GetDBPass() string {
 }
 
 func (c *baseConfig) GetDBSSLMode() string {
-	sslMode := os.Getenv("DB.SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
-	return sslMode
+	return os.Getenv("DB.SSLMODE")
 }
 
 func (c *baseConfig) GetSentryConfig() sentry.ClientOptions {
