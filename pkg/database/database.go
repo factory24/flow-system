@@ -88,6 +88,9 @@ func (db *gormDB) Connect() {
 		log.Fatalf("failed to get db dialect: %v", err)
 	}
 
+	log.Printf("Connecting to %s database at %s:%s (name: %s, user: %s, sslmode: %s)...",
+		dbType, db.cfg.GetDBHost(), db.cfg.GetDBPort(), db.cfg.GetDBName(), db.cfg.GetDBUser(), db.cfg.GetDBSSLMode())
+
 	for {
 		gormConfig := db.gormConfig
 		if gormConfig == nil {
