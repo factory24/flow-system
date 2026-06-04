@@ -21,6 +21,17 @@ type ApiResponse[T any] struct {
 	Data      T        `json:"data"`
 }
 
+// FirstError safely returns the first error string from an API response, falling
+// back to defaultMsg when the Errors slice is nil or empty.
+// Use this everywhere instead of res.Errors[0] to prevent index-out-of-range
+// panics when a non-2xx response arrives with an empty error body.
+func FirstError[T any](res *ApiResponse[T], defaultMsg string) string {
+	if res != nil && len(res.Errors) > 0 {
+		return res.Errors[0]
+	}
+	return defaultMsg
+}
+
 func NewApiResponse() *ApiResponse[any] {
 	return &ApiResponse[any]{
 		Success:   true,
@@ -115,6 +126,11 @@ func (h *EventHeader) UnmarshalPayload(target any) error {
 		return fmt.Errorf("failed to unmarshal event payload for type %T: %w", target, err)
 	}
 	return nil
+}
+
+func (h EventHeader) String() string {
+	jsonBytes, _ := json.Marshal(h)
+	return string(jsonBytes)
 }
 
 func (h *EventHeader) PrettyLog() {
