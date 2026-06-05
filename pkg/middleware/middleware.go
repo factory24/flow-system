@@ -30,6 +30,7 @@ type EchoMiddleware interface {
 	IsRoot(next echo.HandlerFunc) echo.HandlerFunc
 	IsUser(next echo.HandlerFunc) echo.HandlerFunc
 	IsClientAuthenticated(next echo.HandlerFunc) echo.HandlerFunc
+	SystemToken() (string, error)
 }
 
 type echoMiddleware struct {
@@ -71,6 +72,14 @@ func (middleware *echoMiddleware) GetAccessToken(ctx echo.Context) string {
 		return ""
 	}
 	return rawAccessToken
+}
+
+func (middleware *echoMiddleware) SystemToken() (string, error) {
+	token := os.Getenv("SYSTEM_TOKEN")
+	if token == "" {
+		return "", fmt.Errorf("SYSTEM_TOKEN environment variable not set")
+	}
+	return token, nil
 }
 
 func (middleware *echoMiddleware) IsUser(next echo.HandlerFunc) echo.HandlerFunc {
