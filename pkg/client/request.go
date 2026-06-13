@@ -15,24 +15,30 @@ import (
 
 // Request describes one inter-service HTTP call for Do.
 //
-// Auth — set at most ONE of the following (both unset = unauthenticated):
+// Auth model — every inter-service call is authenticated automatically:
 //
-//   - Token:  pass an Authorization value directly. For "context auth" the
-//     caller forwards the inbound request's token, e.g.
-//     Token: middleware.GetAccessToken(ctx). A missing "Bearer " prefix
-//     is added automatically.
-//   - System: true → Do fetches the service-account token from Client.Tokens
-//     (machine identity; for public routes like USSD calling protected
-//     endpoints, cron jobs, and workers).
+//   - Token set  → use it. This is "context auth": the caller forwards the
+//     inbound request's token, e.g. Token: middleware.GetAccessToken(ctx).
+//     A missing "Bearer " prefix is added.
+//   - Token empty → Do pulls the SYSTEM token from Client.Tokens (the
+//     per-service machine identity) and uses that. So you never send an
+//     unauthenticated inter-service call: forward the ctx token when you have
+//     one, otherwise the service authenticates as itself.
+//   - Token empty AND no provider configured → sent unauthenticated (legacy;
+//     only when the Client was built without a ServiceTokenProvider).
+//
+// Set Public: true to force an unauthenticated call even when a provider
+// exists (e.g. hitting a genuinely public third-party endpoint via Do).
 type Request struct {
 	Method string
 	URL    string
 	// Body is JSON-encoded when non-nil.
 	Body any
-	// Token is an explicit Authorization value (context auth / direct token).
+	// Token is an explicit Authorization value (forwarded context/human JWT).
+	// When empty, Do falls back to the system token.
 	Token string
-	// System selects the service-account token from Client.Tokens.
-	System bool
+	// Public forces an unauthenticated request (skips the system-token fallback).
+	Public bool
 	// ExpectedStatus is the exact status code required for success.
 	// Zero accepts any 2xx.
 	ExpectedStatus int
@@ -107,26 +113,33 @@ func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 	return apiResponse, nil
 }
 
-// setAuth applies the Request's auth choice to the outgoing request.
+// setAuth applies the Request's auth choice to the outgoing request:
+// forwarded context token if present, otherwise the system token (so calls are
+// authenticated by default). Public:true or a Client with no provider sends none.
 func setAuth(ctx context.Context, c *Client, r Request, req *http.Request) error {
-	switch {
-	case r.Token != "":
+	if r.Public {
+		return nil
+	}
+
+	// Context auth: forward the supplied (human/inbound) token.
+	if r.Token != "" {
 		token := r.Token
 		if !strings.HasPrefix(token, "Bearer ") {
 			token = "Bearer " + token
 		}
 		req.Header.Set("Authorization", token)
-
-	case r.System:
-		if c.Tokens == nil {
-			return fmt.Errorf("client.Do %s %s: system auth requested but client has no token provider", r.Method, r.URL)
-		}
-		token, err := c.Tokens.GetToken(ctx)
-		if err != nil {
-			return fmt.Errorf("client.Do %s %s: system auth: %w", r.Method, r.URL, err)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		return nil
 	}
 
+	// No context token → fall back to this service's own system identity.
+	if c.Tokens == nil {
+		// No provider wired — legacy unauthenticated call.
+		return nil
+	}
+	token, err := c.Tokens.GetToken(ctx)
+	if err != nil {
+		return fmt.Errorf("client.Do %s %s: system auth: %w", r.Method, r.URL, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
 }

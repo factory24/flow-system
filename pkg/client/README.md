@@ -36,13 +36,31 @@ return resp.Data, nil
 status check, error extraction (`response.FirstError`), 204/empty-body
 handling, logging — happens inside `Do`.
 
-### Auth — exactly one of three ways
+### Auth — token-or-system, automatic
 
-| Field | Meaning |
+Every inter-service call is authenticated by default. You only choose whether
+to **forward** an inbound token; if you don't, the client authenticates as
+itself.
+
+| `Request` field | Behaviour |
 |---|---|
-| *(neither set)* | Unauthenticated call (public endpoint). |
-| `Token: middleware.GetAccessToken(ctx)` | **Context auth** — forward the human JWT from the inbound request. Also accepts any raw token; `"Bearer "` is added if missing. |
-| `System: true` | **System auth** — `Do` fetches a machine token from the `ServiceTokenProvider` (Keycloak client-credentials, cached). For public routes that call protected endpoints (USSD → Billing), cron jobs, and workers. Fails loudly if the provider is missing or errors — it never silently sends an unauthenticated request. |
+| `Token: middleware.GetAccessToken(ctx)` (or `ctx.Request().Header.Get("Authorization")`) | **Context auth** — forward the inbound human/caller JWT. `"Bearer "` added if missing. |
+| `Token` empty | **System auth (automatic)** — `Do` pulls this service's own token from the `ServiceTokenProvider` and uses it. You never send a bare inter-service call. |
+| `Public: true` | Force an unauthenticated request (skip the system fallback) — for genuinely public third-party endpoints. |
+
+So a client method typically does:
+
+```go
+Token: token(ctx),   // inbound token if present; empty → system token kicks in
+```
+
+where `token(ctx)` returns `ctx.Request().Header.Get("Authorization")` (empty
+on public/USSD requests). Because the system identity is a per-service Keycloak
+**user**, the downstream service sees real user claims either way — the human
+when forwarded, or `service.<name>` when the system token is used.
+
+If the `Client` was built without a provider (`client.New(nil)`), an empty
+`Token` simply sends no auth header (legacy).
 
 ### Status handling
 

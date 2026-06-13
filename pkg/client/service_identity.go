@@ -55,6 +55,9 @@ type ServiceIdentityConfig struct {
 	ClientSecret      string
 	AdminClientID     string
 	AdminClientSecret string
+	// AccountType set on the bootstrapped service user (claim source for the
+	// token's audience). Defaults to "root" — platform-wide system access.
+	AccountType string
 }
 
 type ServiceIdentity struct {
@@ -170,8 +173,19 @@ func (s *ServiceIdentity) ensureAccount(ctx context.Context) error {
 		return fmt.Errorf("admin token: %w", err)
 	}
 
+	// The service user must carry the SAME claim data as a normal user so the
+	// receiving service treats a system-token call exactly like an authenticated
+	// user (no public routes, no special-casing). accountType "root" gives it
+	// platform-wide access; businessId scopes it to the root business. These
+	// attributes only matter alongside the Keycloak protocol mappers that copy
+	// them into the token (audience/businessId/role) — same mappers normal users
+	// use. AccountType is overridable via cfg.AccountType.
+	accountType := s.cfg.AccountType
+	if accountType == "" {
+		accountType = "root"
+	}
 	attributes := map[string][]string{
-		"accountType": {"service"},
+		"accountType": {accountType},
 		"isService":   {"true"},
 	}
 	if s.cfg.RootBusinessID != "" {
