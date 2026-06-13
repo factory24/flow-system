@@ -53,23 +53,46 @@ handling, logging — happens inside `Do`.
   `ApiResponse` is also returned when available.
 - `204 No Content` / empty bodies are not decoded (no spurious `EOF`).
 
-## System auth setup (F3)
+## System auth setup (F3) — per-service identity
 
-The provider is wired once in `cmd/main.go`:
+Each service authenticates as its **own Keycloak user account**, named after
+the service and scoped under the root businessId. The account is created
+automatically on first use (bootstrap via the Keycloak admin API), so nothing
+is provisioned by hand. Because the JWT's `preferred_username` is
+`service.<name>`, every inter-service call is traceable to the service that
+originated it — the foundation for cross-service transaction tracing.
+
+Wired once in `cmd/main.go`:
 
 ```go
-tp := client.NewServiceTokenProvider(
+tp := client.NewServiceIdentity(
+    "water-credit-service",            // → Keycloak user "service.water-credit-service"
     cfg.GetKeycloakClientID(),
     cfg.GetKeycloakClientSecret(),
     cfg.GetKeycloakBaseURL(),
     cfg.GetKeycloakRealm(),
+    os.Getenv("SYSTEM.ROOT_BUSINESS_ID"), // businessId attribute on the account
 )
-billingClient := clients.NewBillingClient(client.New(tp))
+billingClient := clients.NewBillingClient(tp)
 ```
 
-Prerequisite: the Keycloak client must have **Service accounts enabled** and
-the roles needed by the endpoints it calls; tokens are cached and refreshed
-30s before expiry.
+How it works:
+
+- **Login**: password grant as `service.<name>`; tokens cached, refreshed 30s
+  before expiry.
+- **Bootstrap**: if login fails (first run), the provider takes a
+  client-credentials token, creates the user (attributes `accountType=service`,
+  `isService=true`, `businessId=<root>`), sets the password, and logs in again.
+  Idempotent — a 409 just resets the password.
+- **Password**: derived as `HMAC-SHA256(clientSecret, "flow-service:"+name)` —
+  deterministic across restarts and replicas, never stored anywhere.
+
+Keycloak prerequisites: the client must allow the **password grant** (Direct
+Access Grants) and have **Service accounts enabled** with user-management
+roles (`manage-users`) for the bootstrap.
+
+`NewServiceTokenProvider(...)` (plain client-credentials, shared identity) is
+still available for cases where a per-service user is not wanted.
 
 ## When NOT to use `Do`
 
