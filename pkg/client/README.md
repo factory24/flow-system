@@ -62,34 +62,45 @@ is provisioned by hand. Because the JWT's `preferred_username` is
 `service.<name>`, every inter-service call is traceable to the service that
 originated it — the foundation for cross-service transaction tracing.
 
-Wired once in `cmd/main.go`:
+Wired once in `cmd/main.go` (mirrors how UserService talks to Keycloak):
 
 ```go
-tp := client.NewServiceIdentity(
-    "water-credit-service",            // → Keycloak user "service.water-credit-service"
-    cfg.GetKeycloakClientID(),
-    cfg.GetKeycloakClientSecret(),
-    cfg.GetKeycloakBaseURL(),
-    cfg.GetKeycloakRealm(),
-    os.Getenv("SYSTEM.ROOT_BUSINESS_ID"), // businessId attribute on the account
-)
+tp := client.NewServiceIdentity(client.ServiceIdentityConfig{
+    ServiceName:    "water-credit-service",          // → user "service.water-credit-service"
+    BaseURL:        cfg.GetKeycloakBaseURL(),         // KC.BASE_URL
+    Realm:          cfg.GetKeycloakRealm(),           // KC.REALM
+    RootBusinessID: os.Getenv("SYSTEM.ROOT_BUSINESS_ID"),
+    // Login client — the service user authenticates here (KC.CLIENT_ID/SECRET).
+    ClientID:     cfg.GetKeycloakClientID(),
+    ClientSecret: cfg.GetKeycloakClientSecret(),
+    // Admin USER (username/password) for first-run bootstrap — the SAME creds
+    // UserService uses. NOT a client id/secret.
+    AdminClientID:     os.Getenv("KC.ADMIN_CLIENT_ID"),
+    AdminClientSecret: os.Getenv("KC.ADMIN_CLIENT_SECRET"),
+})
 billingClient := clients.NewBillingClient(tp)
 ```
 
 How it works:
 
-- **Login**: password grant as `service.<name>`; tokens cached, refreshed 30s
-  before expiry.
-- **Bootstrap**: if login fails (first run), the provider takes a
-  client-credentials token, creates the user (attributes `accountType=service`,
-  `isService=true`, `businessId=<root>`), sets the password, and logs in again.
-  Idempotent — a 409 just resets the password.
-- **Password**: derived as `HMAC-SHA256(clientSecret, "flow-service:"+name)` —
-  deterministic across restarts and replicas, never stored anywhere.
+- **Login**: password grant as `service.<name>` against the LOGIN client
+  (`KC.CLIENT_ID`); tokens cached, refreshed 30s before expiry.
+- **Bootstrap** (first run, when login 401s): gets an admin token via the
+  built-in `admin-cli` client using the admin user's
+  `KC.ADMIN_CLIENT_ID`/`KC.ADMIN_CLIENT_SECRET` (**exactly** gocloak's
+  `LoginAdmin` — a password grant, not client-credentials), creates the user
+  (`accountType=service`, `isService=true`, `businessId=<root>`), sets the
+  password, logs in again. Idempotent — a 409 just resets the password.
+  If no admin creds are configured, bootstrap is skipped and the service user
+  must be pre-seeded.
+- **Password**: `HMAC-SHA256(adminSecret, "flow-service:"+name)` — deterministic
+  across restarts/replicas, never stored.
 
-Keycloak prerequisites: the client must allow the **password grant** (Direct
-Access Grants) and have **Service accounts enabled** with user-management
-roles (`manage-users`) for the bootstrap.
+**Keycloak prerequisites**:
+- The LOGIN client (`KC.CLIENT_ID`) must have **Direct Access Grants enabled**
+  (password grant) so the service user can log in.
+- The admin user (`KC.ADMIN_CLIENT_ID`) must have **manage-users** in the realm
+  (it already does — UserService creates users with it).
 
 `NewServiceTokenProvider(...)` (plain client-credentials, shared identity) is
 still available for cases where a per-service user is not wanted.
@@ -102,7 +113,10 @@ bend `Do` around it.
 
 ## Migration playbook (pilot: WaterCredit → Billing for the public USSD route)
 
-1. Replace the service-local `New()` with the `NewHTTP()` / `New(tp)` wrappers.
+1. **Delete the service-local `pkg/clients/client.go` `New()` wrapper.** Legacy
+   clients call `client.NewHTTP()` directly — there is NO per-service HTTP-client
+   factory to maintain (that was the whole point of moving it into flow-system).
+   Migrated clients use `client.New(tp)` + `Do`.
 2. Migrate ONE client (Billing) to `Do` with `System: true`; build + verify the
    USSD recharge path end-to-end in dev.
 3. Only then migrate the remaining clients of that service (use

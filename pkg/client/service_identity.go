@@ -19,27 +19,46 @@ import (
 
 // ServiceIdentity is a ServiceTokenProvider where each service authenticates
 // as its OWN Keycloak user account (username "service.<service-name>", created
-// under the root businessId). Compared to a shared client-credentials account,
-// every inter-service call carries the ORIGIN service's identity in the JWT
-// (preferred_username = service.<name>), so calls can be traced back to the
-// service that started them — the foundation for cross-service transaction
-// tracing (Jaeger later).
+// under the root businessId). Every inter-service call then carries the ORIGIN
+// service's identity in the JWT (preferred_username = service.<name>), so calls
+// can be traced back to the service that started them — the foundation for
+// cross-service transaction tracing (Jaeger later).
 //
 // Flow on first GetToken (then cached until ~expiry):
-//  1. password-grant login as service.<name>
+//  1. password-grant login as service.<name> (login client)
 //  2. if the account doesn't exist yet → bootstrap it via the Keycloak admin
-//     API (create user under the root businessId, set a deterministic
-//     password) and log in again.
+//     API (admin client; create user under the root businessId, set a
+//     deterministic password) and log in again.
 //
-// The password is derived as HMAC-SHA256(clientSecret, "flow-service:"+name):
+// The password is derived as HMAC-SHA256(adminSecret, "flow-service:"+name):
 // deterministic across restarts/replicas, never stored anywhere.
+//
+// ServiceIdentityConfig configures a per-service identity. Two separate
+// Keycloak clients are involved (mirroring UserService):
+//
+//   - ClientID/ClientSecret — the LOGIN client (Direct Access Grants enabled)
+//     used for the password-grant login as the service user. May be the same
+//     public/confidential client end users log in with (KC.CLIENT_ID/SECRET).
+//     A public login client can leave ClientSecret empty.
+//   - AdminClientID/AdminClientSecret — the Keycloak admin USER's
+//     username/password (NOT a client id/secret), used ONLY to bootstrap
+//     (create) the service user via the built-in "admin-cli" client — exactly
+//     how UserService authenticates (KC.ADMIN_CLIENT_ID/KC.ADMIN_CLIENT_SECRET).
+//     The admin user needs manage-users in the realm. If left empty, bootstrap
+//     is disabled and the service user must be pre-seeded.
+type ServiceIdentityConfig struct {
+	ServiceName       string
+	BaseURL           string
+	Realm             string
+	RootBusinessID    string
+	ClientID          string
+	ClientSecret      string
+	AdminClientID     string
+	AdminClientSecret string
+}
+
 type ServiceIdentity struct {
-	serviceName    string
-	clientID       string
-	clientSecret   string
-	baseURL        string
-	realm          string
-	rootBusinessID string
+	cfg ServiceIdentityConfig
 
 	username string
 	password string
@@ -51,25 +70,26 @@ type ServiceIdentity struct {
 	httpClient *http.Client
 }
 
-// NewServiceIdentity builds the per-service identity provider.
-// serviceName e.g. "water-credit-service"; rootBusinessID scopes the account
-// to the platform root business (may be empty — attribute is then omitted).
-// The Keycloak client (clientID/clientSecret) must allow the password grant
-// and have service accounts enabled with user-management roles for bootstrap.
-func NewServiceIdentity(serviceName, clientID, clientSecret, baseURL, realm, rootBusinessID string) ServiceTokenProvider {
-	mac := hmac.New(sha256.New, []byte(clientSecret))
-	mac.Write([]byte("flow-service:" + serviceName))
+// NewServiceIdentity builds the per-service identity provider. serviceName
+// e.g. "water-credit-service" → Keycloak user "service.water-credit-service".
+func NewServiceIdentity(cfg ServiceIdentityConfig) ServiceTokenProvider {
+	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+
+	// Deterministic password derived from the admin secret (stable across
+	// restarts/replicas, never stored). Falls back to the login secret if no
+	// admin secret is configured.
+	seed := cfg.AdminClientSecret
+	if seed == "" {
+		seed = cfg.ClientSecret
+	}
+	mac := hmac.New(sha256.New, []byte(seed))
+	mac.Write([]byte("flow-service:" + cfg.ServiceName))
 
 	return &ServiceIdentity{
-		serviceName:    serviceName,
-		clientID:       clientID,
-		clientSecret:   clientSecret,
-		baseURL:        strings.TrimRight(baseURL, "/"),
-		realm:          realm,
-		rootBusinessID: rootBusinessID,
-		username:       "service." + serviceName,
-		password:       hex.EncodeToString(mac.Sum(nil)),
-		httpClient:     &http.Client{Timeout: 15 * time.Second},
+		cfg:        cfg,
+		username:   "service." + cfg.ServiceName,
+		password:   hex.EncodeToString(mac.Sum(nil)),
+		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
@@ -96,6 +116,7 @@ func (s *ServiceIdentity) GetToken(ctx context.Context) (string, error) {
 
 	s.cached = token
 	s.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+	log.Printf("service identity %q: authenticated ✓ (token valid for %ds)", s.username, expiresIn)
 	return s.cached, nil
 }
 
@@ -103,8 +124,10 @@ func (s *ServiceIdentity) GetToken(ctx context.Context) (string, error) {
 func (s *ServiceIdentity) login(ctx context.Context) (string, int, error) {
 	data := url.Values{}
 	data.Set("grant_type", "password")
-	data.Set("client_id", s.clientID)
-	data.Set("client_secret", s.clientSecret)
+	data.Set("client_id", s.cfg.ClientID)
+	if s.cfg.ClientSecret != "" {
+		data.Set("client_secret", s.cfg.ClientSecret)
+	}
 	data.Set("username", s.username)
 	data.Set("password", s.password)
 
@@ -139,6 +162,9 @@ func (s *ServiceIdentity) login(ctx context.Context) (string, int, error) {
 // password. Idempotent: a 409 on create means the account already exists
 // (e.g. password drifted after a secret rotation) and we just reset it.
 func (s *ServiceIdentity) ensureAccount(ctx context.Context) error {
+	if s.cfg.AdminClientID == "" {
+		return fmt.Errorf("no admin client configured — pre-seed the %q user or set AdminClientID/AdminClientSecret", s.username)
+	}
 	adminToken, err := s.adminToken(ctx)
 	if err != nil {
 		return fmt.Errorf("admin token: %w", err)
@@ -148,19 +174,19 @@ func (s *ServiceIdentity) ensureAccount(ctx context.Context) error {
 		"accountType": {"service"},
 		"isService":   {"true"},
 	}
-	if s.rootBusinessID != "" {
-		attributes["businessId"] = []string{s.rootBusinessID}
+	if s.cfg.RootBusinessID != "" {
+		attributes["businessId"] = []string{s.cfg.RootBusinessID}
 	}
 
 	createBody, _ := json.Marshal(map[string]any{
 		"username":   s.username,
 		"enabled":    true,
 		"firstName":  "Service",
-		"lastName":   s.serviceName,
+		"lastName":   s.cfg.ServiceName,
 		"attributes": attributes,
 	})
 
-	createURL := fmt.Sprintf("%s/admin/realms/%s/users", s.baseURL, s.realm)
+	createURL := fmt.Sprintf("%s/admin/realms/%s/users", s.cfg.BaseURL, s.cfg.Realm)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, createURL, bytes.NewReader(createBody))
 	if err != nil {
 		return err
@@ -189,7 +215,7 @@ func (s *ServiceIdentity) ensureAccount(ctx context.Context) error {
 		"value":     s.password,
 		"temporary": false,
 	})
-	passwordURL := fmt.Sprintf("%s/admin/realms/%s/users/%s/reset-password", s.baseURL, s.realm, userID)
+	passwordURL := fmt.Sprintf("%s/admin/realms/%s/users/%s/reset-password", s.cfg.BaseURL, s.cfg.Realm, userID)
 	req, err = http.NewRequestWithContext(ctx, http.MethodPut, passwordURL, bytes.NewReader(passwordBody))
 	if err != nil {
 		return err
@@ -213,7 +239,7 @@ func (s *ServiceIdentity) ensureAccount(ctx context.Context) error {
 
 func (s *ServiceIdentity) lookupUserID(ctx context.Context, adminToken string) (string, error) {
 	lookupURL := fmt.Sprintf("%s/admin/realms/%s/users?username=%s&exact=true",
-		s.baseURL, s.realm, url.QueryEscape(s.username))
+		s.cfg.BaseURL, s.cfg.Realm, url.QueryEscape(s.username))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lookupURL, nil)
 	if err != nil {
 		return "", err
@@ -245,12 +271,17 @@ func (s *ServiceIdentity) lookupUserID(ctx context.Context, adminToken string) (
 	return "", fmt.Errorf("user %q not found after create", s.username)
 }
 
-// adminToken gets a client-credentials token for the bootstrap admin calls.
+// adminToken gets a Keycloak admin token for the bootstrap calls, using the
+// SAME mechanism UserService uses (gocloak LoginAdmin): a password grant via
+// the built-in public "admin-cli" client, where AdminClientID/AdminClientSecret
+// are the admin USER's username/password (i.e. KC.ADMIN_CLIENT_ID /
+// KC.ADMIN_CLIENT_SECRET), authenticated against the configured realm.
 func (s *ServiceIdentity) adminToken(ctx context.Context) (string, error) {
 	data := url.Values{}
-	data.Set("grant_type", "client_credentials")
-	data.Set("client_id", s.clientID)
-	data.Set("client_secret", s.clientSecret)
+	data.Set("grant_type", "password")
+	data.Set("client_id", "admin-cli")
+	data.Set("username", s.cfg.AdminClientID)
+	data.Set("password", s.cfg.AdminClientSecret)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL(), strings.NewReader(data.Encode()))
 	if err != nil {
@@ -265,7 +296,7 @@ func (s *ServiceIdentity) adminToken(ctx context.Context) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("client credentials returned %s", resp.Status)
+		return "", fmt.Errorf("admin login (admin-cli password grant) returned %s", resp.Status)
 	}
 
 	var res struct {
@@ -278,5 +309,5 @@ func (s *ServiceIdentity) adminToken(ctx context.Context) (string, error) {
 }
 
 func (s *ServiceIdentity) tokenURL() string {
-	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", s.baseURL, s.realm)
+	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", s.cfg.BaseURL, s.cfg.Realm)
 }
