@@ -33,6 +33,7 @@ type BaseConfig interface {
 	GetKeycloakBaseURL() string
 	GetKeycloakRealm() string
 	GetKeycloakClientID() string
+	GetKeycloakClientSecret() string
 	GetDBType() string
 	GetDBName() string
 	GetDBHost() string
@@ -203,6 +204,10 @@ func (c *baseConfig) GetKeycloakRealm() string {
 
 func (c *baseConfig) GetKeycloakClientID() string {
 	return os.Getenv("KC.CLIENT_ID")
+}
+
+func (c *baseConfig) GetKeycloakClientSecret() string {
+	return os.Getenv("KC.CLIENT_SECRET")
 }
 
 func (c *baseConfig) GetDBType() string {
