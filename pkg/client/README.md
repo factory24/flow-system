@@ -51,11 +51,15 @@ itself.
 So a client method typically does:
 
 ```go
-Token: token(ctx),   // inbound token if present; empty → system token kicks in
+client.Do[T](client.Context(ctx), c.client, client.Request{
+    ..., Token: client.Token(ctx),   // inbound token if present; empty → system token
+})
 ```
 
-where `token(ctx)` returns `ctx.Request().Header.Get("Authorization")` (empty
-on public/USSD requests). Because the system identity is a per-service Keycloak
+`client.Token(ctx)` and `client.Context(ctx)` are shared helpers
+(`echo.go`) — read the inbound Authorization header / request context. Use
+them; don't copy-paste per-service `token`/`ctxContext` funcs (that caused
+duplicate-definition build breaks). Because the system identity is a per-service Keycloak
 **user**, the downstream service sees real user claims either way — the human
 when forwarded, or `service.<name>` when the system token is used.
 
