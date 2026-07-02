@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,25 @@ type ServiceIdentity struct {
 	expiresAt time.Time
 
 	httpClient *http.Client
+}
+
+// NewServiceIdentityFromEnv builds the per-service identity provider by reading
+// the standard cluster env vars (KC.BASE_URL, KC.REALM, KC.CLIENT_ID,
+// KC.CLIENT_SECRET, KC.ADMIN_CLIENT_ID, KC.ADMIN_CLIENT_SECRET,
+// SYSTEM.ROOT_BUSINESS_ID). serviceName e.g. "device-service".
+// Use this in main(); call NewServiceIdentity directly only when you need
+// to override individual fields.
+func NewServiceIdentityFromEnv(serviceName string) ServiceTokenProvider {
+	return NewServiceIdentity(ServiceIdentityConfig{
+		ServiceName:       serviceName,
+		BaseURL:           os.Getenv("KC.BASE_URL"),
+		Realm:             os.Getenv("KC.REALM"),
+		RootBusinessID:    os.Getenv("SYSTEM.ROOT_BUSINESS_ID"),
+		ClientID:          os.Getenv("KC.CLIENT_ID"),
+		ClientSecret:      os.Getenv("KC.CLIENT_SECRET"),
+		AdminClientID:     os.Getenv("KC.ADMIN_CLIENT_ID"),
+		AdminClientSecret: os.Getenv("KC.ADMIN_CLIENT_SECRET"),
+	})
 }
 
 // NewServiceIdentity builds the per-service identity provider. serviceName

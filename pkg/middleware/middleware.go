@@ -205,7 +205,7 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 
 		rawAccessToken := ctx.Request().Header.Get("Authorization")
 		if rawAccessToken == "" || !strings.HasPrefix(rawAccessToken, "Bearer ") {
-			return ctx.NoContent(http.StatusUnauthorized)
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Unauthorized"))
 		}
 
 		tr := &http.Transport{
@@ -220,7 +220,7 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		c := oidc.ClientContext(ctx.Request().Context(), client)
 		provider, err := oidc.NewProvider(c, keycloakURL)
 		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		oidcConfig := &oidc.Config{
@@ -232,12 +232,12 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
 		idToken, err := verifier.Verify(c, accessToken)
 		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		user := new(models.KeycloakUser)
 		if err := idToken.Claims(user); err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		ctx.Set("keycloakUser", user)
@@ -252,7 +252,7 @@ func (middleware *echoMiddleware) IsServiceAuthenticated(next echo.HandlerFunc) 
 
 		rawAccessToken := ctx.Request().Header.Get("Authorization")
 		if rawAccessToken == "" || !strings.HasPrefix(rawAccessToken, "Bearer ") {
-			return ctx.NoContent(http.StatusUnauthorized)
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Unauthorized"))
 		}
 
 		tr := &http.Transport{
@@ -267,7 +267,7 @@ func (middleware *echoMiddleware) IsServiceAuthenticated(next echo.HandlerFunc) 
 		c := oidc.ClientContext(ctx.Request().Context(), client)
 		provider, err := oidc.NewProvider(c, keycloakURL)
 		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		// Service tokens are validated without checking ClientID against our own,
@@ -278,12 +278,12 @@ func (middleware *echoMiddleware) IsServiceAuthenticated(next echo.HandlerFunc) 
 		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
 		idToken, err := verifier.Verify(c, accessToken)
 		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		var rawClaims map[string]interface{}
 		if err := idToken.Claims(&rawClaims); err != nil {
-			return ctx.JSON(http.StatusUnauthorized, err.Error())
+			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
 		// Optional: Verify azp is in allowed list
@@ -299,7 +299,7 @@ func (middleware *echoMiddleware) IsServiceAuthenticated(next echo.HandlerFunc) 
 				}
 			}
 			if !found {
-				return ctx.JSON(http.StatusForbidden, "service client not authorized")
+				return ctx.JSON(http.StatusForbidden, response.NewErrorResponse("service client not authorized"))
 			}
 		}
 
