@@ -20,15 +20,16 @@ import (
 	"time"
 
 	"github.com/motemen/go-loghttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// NewHTTP returns the standard outbound HTTP client (loghttp request/response
-// logging + timeout). Legacy clients that still build their own requests and
-// set Authorization manually should use this instead of a local New().
+// NewHTTP returns the standard outbound HTTP client: otelhttp wraps loghttp so
+// every call gets request/response logging AND an OTel child span with W3C
+// traceparent injection (when the request carries an active span context).
 func NewHTTP() *http.Client {
 	return &http.Client{
 		Timeout:   60 * time.Second,
-		Transport: &loghttp.Transport{},
+		Transport: otelhttp.NewTransport(&loghttp.Transport{}),
 	}
 }
 
