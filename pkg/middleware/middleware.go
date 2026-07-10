@@ -30,8 +30,6 @@ type EchoMiddleware interface {
 	IsRoot(next echo.HandlerFunc) echo.HandlerFunc
 	IsUser(next echo.HandlerFunc) echo.HandlerFunc
 	IsClientAuthenticated(next echo.HandlerFunc) echo.HandlerFunc
-	IsServiceAuthenticated(next echo.HandlerFunc) echo.HandlerFunc
-	IsAuthenticatedAny(next echo.HandlerFunc) echo.HandlerFunc
 	SystemToken() (string, error)
 }
 
@@ -198,6 +196,12 @@ func (middleware *echoMiddleware) IsAuthorizedPersonas(next echo.HandlerFunc) ec
 	}
 }
 
+// IsAuthorizedJWT accepts both human tokens (audience == our own KC.CLIENT_ID)
+// and service/system tokens minted via ServiceIdentity (audience is the
+// service's own account, not ours). It tries the strict human-audience check
+// first; only on failure does it re-verify as a service token (signature +
+// issuer only, audience unchecked) so a single middleware covers both cases —
+// no separate "any" wrapper needed, and exactly one response is ever written.
 func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(ctx echo.Context) error {
 		var keycloakURL = fmt.Sprintf("%s/realms/%s", os.Getenv("KC.BASE_URL"), os.Getenv("KC.REALM"))
@@ -207,6 +211,7 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		if rawAccessToken == "" || !strings.HasPrefix(rawAccessToken, "Bearer ") {
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Unauthorized"))
 		}
+		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
 
 		tr := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -223,16 +228,51 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 
-		oidcConfig := &oidc.Config{
-			ClientID: clientID,
-		}
+		idToken, humanErr := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(c, accessToken)
+		if humanErr != nil {
+			// Not a valid human-audience token — re-verify as a service token
+			// (signature/issuer only; service tokens don't carry our clientID
+			// as audience).
+			var serviceErr error
+			idToken, serviceErr = provider.Verifier(&oidc.Config{SkipClientIDCheck: true}).Verify(c, accessToken)
+			if serviceErr != nil {
+				return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(humanErr.Error()))
+			}
 
-		verifier := provider.Verifier(oidcConfig)
+			var rawClaims map[string]interface{}
+			if err := idToken.Claims(&rawClaims); err != nil {
+				return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
+			}
 
-		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
-		idToken, err := verifier.Verify(c, accessToken)
-		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
+			// Optional: verify azp is in the allowed-service-clients list.
+			allowedClients := os.Getenv("KC.ALLOWED_CLIENTS")
+			if allowedClients != "" {
+				azp, _ := rawClaims["azp"].(string)
+				allowedList := strings.Split(allowedClients, ",")
+				found := false
+				for _, allowed := range allowedList {
+					if strings.TrimSpace(allowed) == azp {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return ctx.JSON(http.StatusForbidden, response.NewErrorResponse("service client not authorized"))
+				}
+			}
+
+			// Service tokens carry the same claim shape as a human user (the
+			// ServiceIdentity account is a real Keycloak user), so decode them
+			// the same way and just note the source.
+			user := new(models.KeycloakUser)
+			if err := idToken.Claims(user); err != nil {
+				return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
+			}
+			if user.Role == "" {
+				user.Role = "service"
+			}
+			ctx.Set("keycloakUser", user)
+			return next(ctx)
 		}
 
 		user := new(models.KeycloakUser)
@@ -243,88 +283,6 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		ctx.Set("keycloakUser", user)
 
 		return next(ctx)
-	}
-}
-
-func (middleware *echoMiddleware) IsServiceAuthenticated(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(ctx echo.Context) error {
-		var keycloakURL = fmt.Sprintf("%s/realms/%s", os.Getenv("KC.BASE_URL"), os.Getenv("KC.REALM"))
-
-		rawAccessToken := ctx.Request().Header.Get("Authorization")
-		if rawAccessToken == "" || !strings.HasPrefix(rawAccessToken, "Bearer ") {
-			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Unauthorized"))
-		}
-
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-
-		client := &http.Client{
-			Timeout:   time.Duration(60) * time.Second,
-			Transport: tr,
-		}
-
-		c := oidc.ClientContext(ctx.Request().Context(), client)
-		provider, err := oidc.NewProvider(c, keycloakURL)
-		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
-		}
-
-		// Service tokens are validated without checking ClientID against our own,
-		// because the token audience will be Keycloak itself or the service account.
-		// We verify the token is valid and optionally check the authorized party (azp).
-		verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
-
-		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
-		idToken, err := verifier.Verify(c, accessToken)
-		if err != nil {
-			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
-		}
-
-		var rawClaims map[string]interface{}
-		if err := idToken.Claims(&rawClaims); err != nil {
-			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
-		}
-
-		// Optional: Verify azp is in allowed list
-		allowedClients := os.Getenv("KC.ALLOWED_CLIENTS")
-		if allowedClients != "" {
-			azp, _ := rawClaims["azp"].(string)
-			allowedList := strings.Split(allowedClients, ",")
-			found := false
-			for _, client := range allowedList {
-				if strings.TrimSpace(client) == azp {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ctx.JSON(http.StatusForbidden, response.NewErrorResponse("service client not authorized"))
-			}
-		}
-
-		user := &models.KeycloakUser{
-			ID:   idToken.Subject,
-			Role: "service",
-		}
-
-		ctx.Set("keycloakUser", user)
-
-		return next(ctx)
-	}
-}
-
-func (middleware *echoMiddleware) IsAuthenticatedAny(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(ctx echo.Context) error {
-		// Try human auth first
-		if err := middleware.IsAuthorizedJWT(func(c echo.Context) error {
-			return nil
-		})(ctx); err == nil {
-			return next(ctx)
-		}
-
-		// If human auth fails, try service auth
-		return middleware.IsServiceAuthenticated(next)(ctx)
 	}
 }
 
