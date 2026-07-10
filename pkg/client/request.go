@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/factory24/flow-system/pkg/response"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Request describes one inter-service HTTP call for Do.
@@ -87,16 +89,36 @@ func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 		(r.ExpectedStatus == 0 && resp.StatusCode >= 200 && resp.StatusCode < 300)
 
 	if !ok {
+		// otelhttp's own client span already ended by this point (it closes
+		// synchronously inside RoundTrip, before Do ever sees the response),
+		// and it only reflects transport-level failures anyway — a 4xx/5xx is
+		// a "successful" round trip to it. So the API's own error message
+		// never reaches the trace at all today. RecordError on the *enclosing*
+		// span (the caller's handler span) instead: it's still live, and
+		// RecordError adds a non-destructive exception event rather than
+		// overwriting span status, so multiple Do calls in one handler don't
+		// clobber each other.
+		span := trace.SpanFromContext(ctx)
+
 		// Best-effort decode so the caller sees the API's own error message.
 		apiResponse := new(response.ApiResponse[T])
 		if decodeErr := json.NewDecoder(resp.Body).Decode(apiResponse); decodeErr == nil {
-			err := fmt.Errorf("client.Do %s %s: status %d: %s",
-				r.Method, r.URL, resp.StatusCode, response.FirstError(apiResponse, resp.Status))
+			apiErrMsg := response.FirstError(apiResponse, resp.Status)
+			err := fmt.Errorf("client.Do %s %s: status %d: %s", r.Method, r.URL, resp.StatusCode, apiErrMsg)
 			log.Println(err)
+			span.RecordError(err, trace.WithAttributes(
+				attribute.String("client.url", r.URL),
+				attribute.Int("client.response.status_code", resp.StatusCode),
+				attribute.String("client.api_error", apiErrMsg),
+			))
 			return apiResponse, err
 		}
 		err := fmt.Errorf("client.Do %s %s: status %d (%s)", r.Method, r.URL, resp.StatusCode, resp.Status)
 		log.Println(err)
+		span.RecordError(err, trace.WithAttributes(
+			attribute.String("client.url", r.URL),
+			attribute.Int("client.response.status_code", resp.StatusCode),
+		))
 		return nil, err
 	}
 

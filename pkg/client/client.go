@@ -26,10 +26,18 @@ import (
 // NewHTTP returns the standard outbound HTTP client: otelhttp wraps loghttp so
 // every call gets request/response logging AND an OTel child span with W3C
 // traceparent injection (when the request carries an active span context).
+//
+// otelhttp's default span name is just "HTTP {method}" — every outbound call
+// in a trace waterfall looks identical until you expand each one. Name it
+// after the target host + path instead so the trace is scannable at a glance.
 func NewHTTP() *http.Client {
 	return &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: otelhttp.NewTransport(&loghttp.Transport{}),
+		Timeout: 60 * time.Second,
+		Transport: otelhttp.NewTransport(&loghttp.Transport{},
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.Method + " " + r.Host + r.URL.Path
+			}),
+		),
 	}
 }
 
