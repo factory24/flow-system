@@ -9,6 +9,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 type Config interface {
@@ -124,6 +125,16 @@ func (db *gormDB) Connect() {
 	}
 
 	log.Printf("%s database connected successfully\n", dbType)
+
+	// Without this, every service was completely invisible in DB call
+	// tracing (SigNoz/Jaeger's "DB Call Metrics" tab) regardless of how much
+	// other tracing worked — no db.system/db.statement/duration spans were
+	// ever emitted for any query, in any service, before this. Uses
+	// whatever TracerProvider athari-thirdparty/tracing.Connect() already
+	// registered globally, same as the HTTP client and Pulsar wiring.
+	if err := connection.Use(tracing.NewPlugin()); err != nil {
+		log.Printf("WARNING: failed to register GORM OTel tracing plugin: %v", err)
+	}
 
 	db.engine = connection
 	db.MigrateDB()

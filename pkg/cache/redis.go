@@ -74,3 +74,16 @@ func (c *redisCache) Set(ctx context.Context, key string, value string, ttl time
 func (c *redisCache) Delete(ctx context.Context, key string) error {
 	return c.client.Del(ctx, key).Err()
 }
+
+// TTLFromEnv parses a Go duration from the given env var, falling back to def
+// when unset or invalid. Just an env-parsing helper for the const TTLs each
+// service defines next to its cache-aside code (see
+// learns/shared-redis-cache-flow-system.md) — not a generic cache wrapper.
+func TTLFromEnv(envVar string, def time.Duration) time.Duration {
+	if v := os.Getenv(envVar); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
