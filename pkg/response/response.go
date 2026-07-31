@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jszwec/csvutil"
@@ -25,11 +26,51 @@ type ApiResponse[T any] struct {
 // back to defaultMsg when the Errors slice is nil or empty.
 // Use this everywhere instead of res.Errors[0] to prevent index-out-of-range
 // panics when a non-2xx response arrives with an empty error body.
+//
+// It looks at Errors only. When you are building a message for a human, prefer
+// ErrorText — a failing response often explains itself in `message` and leaves
+// `errors` empty (or vice versa), and this one silently drops half of that.
 func FirstError[T any](res *ApiResponse[T], defaultMsg string) string {
 	if res != nil && len(res.Errors) > 0 {
 		return res.Errors[0]
 	}
 	return defaultMsg
+}
+
+// ErrorText renders everything a failing API response says about itself: its
+// `message` plus every entry in `errors`. Services populate either field —
+// `{"message":"card not found","errors":[]}` is as common as
+// `{"message":"","errors":["card not found"]}` — so reading just one loses the
+// explanation the remote service went to the trouble of sending.
+//
+// Duplicates are dropped (a service that puts the same text in both fields
+// shouldn't produce it twice), entries are joined with "; ", and defaultMsg is
+// returned only when the response really said nothing.
+func ErrorText[T any](res *ApiResponse[T], defaultMsg string) string {
+	if res == nil {
+		return defaultMsg
+	}
+
+	parts := make([]string, 0, len(res.Errors)+1)
+	seen := make(map[string]bool, len(res.Errors)+1)
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		parts = append(parts, s)
+	}
+
+	add(res.Message)
+	for _, e := range res.Errors {
+		add(e)
+	}
+
+	if len(parts) == 0 {
+		return defaultMsg
+	}
+	return strings.Join(parts, "; ")
 }
 
 func NewApiResponse() *ApiResponse[any] {

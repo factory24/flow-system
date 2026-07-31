@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/factory24/flow-system/pkg/response"
@@ -46,6 +47,48 @@ type Request struct {
 	ExpectedStatus int
 }
 
+// describeCall renders a call the way someone reading a log line or an API
+// error needs it — which service was called, and what for:
+//
+//	user-service GET /v1/users/3d4f4032-45b9-427c-9507-510746b97b6e
+//
+// The host is the service's own name in-cluster, so it doubles as the label a
+// reader recognises. Falls back to the raw URL if it can't be parsed.
+func describeCall(method, rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return fmt.Sprintf("%s %s", method, rawURL)
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return fmt.Sprintf("%s %s %s", u.Hostname(), method, path)
+}
+
+// describeStatus says, in plain words, what the called service did with the
+// request. The numeric code is kept for anyone who wants to look it up.
+func describeStatus(code int) string {
+	switch {
+	case code == http.StatusUnauthorized:
+		return "rejected the request as unauthenticated (HTTP 401 — the access token was missing, expired, or not accepted)"
+	case code == http.StatusForbidden:
+		return "refused the request (HTTP 403 — the caller does not have permission)"
+	case code == http.StatusNotFound:
+		return "could not find what was asked for (HTTP 404)"
+	case code == http.StatusConflict:
+		return "reported a conflict (HTTP 409 — the resource already exists or has changed)"
+	case code == http.StatusRequestTimeout || code == http.StatusGatewayTimeout:
+		return fmt.Sprintf("timed out (HTTP %d)", code)
+	case code >= 500:
+		return fmt.Sprintf("hit an internal error (HTTP %d)", code)
+	case code >= 400:
+		return fmt.Sprintf("rejected the request (HTTP %d)", code)
+	default:
+		return fmt.Sprintf("answered with an unexpected status (HTTP %d)", code)
+	}
+}
+
 // Do performs the request and decodes the body into response.ApiResponse[T].
 // All error handling and logging live here so individual clients stay thin:
 //
@@ -53,35 +96,42 @@ type Request struct {
 //   - an unexpected status returns an error containing the API's first error
 //     message (the partially-decoded ApiResponse is also returned when available)
 //   - 204 / empty bodies are not decoded (no spurious EOF)
+//
+// Errors are phrased for whoever ends up reading them — they surface in service
+// logs AND in the `errors` array of the API response the dashboard shows — so
+// they name the service being called and what went wrong, rather than the Go
+// function that produced them.
 func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse[T], error) {
+	call := describeCall(r.Method, r.URL)
+
 	if c == nil || c.HTTP == nil {
-		return nil, fmt.Errorf("client.Do %s %s: nil client", r.Method, r.URL)
+		return nil, fmt.Errorf("%s: not sent — this service has no HTTP client configured", call)
 	}
 
 	var bodyReader io.Reader
 	if r.Body != nil {
 		bodyBytes, err := json.Marshal(r.Body)
 		if err != nil {
-			return nil, fmt.Errorf("client.Do %s %s: marshal body: %w", r.Method, r.URL, err)
+			return nil, fmt.Errorf("%s: not sent — the request body could not be encoded as JSON: %w", call, err)
 		}
 		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, r.URL, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("client.Do %s %s: build request: %w", r.Method, r.URL, err)
+		return nil, fmt.Errorf("%s: not sent — the request could not be built: %w", call, err)
 	}
 	if r.Body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	if err := setAuth(ctx, c, r, req); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: not sent — %w", call, err)
 	}
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("client.Do %s %s: %w", r.Method, r.URL, err)
+		return nil, fmt.Errorf("%s: could not reach the service — %w", call, err)
 	}
 	defer resp.Body.Close()
 
@@ -103,8 +153,11 @@ func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 		// Best-effort decode so the caller sees the API's own error message.
 		apiResponse := new(response.ApiResponse[T])
 		if decodeErr := json.NewDecoder(resp.Body).Decode(apiResponse); decodeErr == nil {
-			apiErrMsg := response.FirstError(apiResponse, resp.Status)
-			err := fmt.Errorf("client.Do %s %s: status %d: %s", r.Method, r.URL, resp.StatusCode, apiErrMsg)
+			// ErrorText, not FirstError: a failing response explains itself in
+			// `message` as often as in `errors`, and dropping either half is how
+			// callers ended up staring at a bare status code.
+			apiErrMsg := response.ErrorText(apiResponse, resp.Status)
+			err := fmt.Errorf("%s: %s — %s", call, describeStatus(resp.StatusCode), apiErrMsg)
 			log.Println(err)
 			span.RecordError(err, trace.WithAttributes(
 				attribute.String("client.url", r.URL),
@@ -113,7 +166,7 @@ func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 			))
 			return apiResponse, err
 		}
-		err := fmt.Errorf("client.Do %s %s: status %d (%s)", r.Method, r.URL, resp.StatusCode, resp.Status)
+		err := fmt.Errorf("%s: %s", call, describeStatus(resp.StatusCode))
 		log.Println(err)
 		span.RecordError(err, trace.WithAttributes(
 			attribute.String("client.url", r.URL),
@@ -129,7 +182,7 @@ func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 
 	apiResponse := new(response.ApiResponse[T])
 	if err := json.NewDecoder(resp.Body).Decode(apiResponse); err != nil {
-		return nil, fmt.Errorf("client.Do %s %s: decode response: %w", r.Method, r.URL, err)
+		return nil, fmt.Errorf("%s: answered with a body this service could not read: %w", call, err)
 	}
 
 	return apiResponse, nil
@@ -160,7 +213,7 @@ func setAuth(ctx context.Context, c *Client, r Request, req *http.Request) error
 	}
 	token, err := c.Tokens.GetToken(ctx)
 	if err != nil {
-		return fmt.Errorf("client.Do %s %s: system auth: %w", r.Method, r.URL, err)
+		return fmt.Errorf("this service could not obtain its own system access token: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return nil

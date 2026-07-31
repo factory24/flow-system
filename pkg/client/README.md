@@ -71,9 +71,41 @@ If the `Client` was built without a provider (`client.New(nil)`), an empty
 - `ExpectedStatus: 201` → exactly 201 or error.
 - `ExpectedStatus: 0` → any 2xx passes.
 - On an unexpected status, `Do` best-effort decodes the body so the returned
-  error contains the API's own first error message; the partially decoded
-  `ApiResponse` is also returned when available.
+  error contains **everything the remote said** — its `message` *and* every
+  entry in `errors` (`response.ErrorText`, deduped, joined with `"; "`). A
+  failing service explains itself in `message` as often as in `errors`;
+  `response.FirstError` reads only the latter, so don't use it for messages a
+  human will read. The partially decoded `ApiResponse` is also returned when
+  available.
 - `204 No Content` / empty bodies are not decoded (no spurious `EOF`).
+
+### Error messages
+
+`Do`'s errors end up in two places a person actually reads: the service log and
+the `errors` array of the API response the dashboard renders. So they are
+written for that reader — **which service was called, what it did** — not named
+after the Go function that produced them:
+
+```
+user-service GET /v1/users/3d4f4032-45b9-427c-9507-510746b97b6e: rejected the
+request as unauthenticated (HTTP 401 — the access token was missing, expired, or
+not accepted) — Get "https://accounts.1flow.org/realms/flow/.well-known/openid-configuration":
+dial tcp 20.50.165.67:443: connect: cannot assign requested address
+```
+
+The shape is always `<service> <METHOD> <path>: <what happened> — <detail>`:
+
+| Situation | Message |
+|---|---|
+| Unexpected status | `… rejected the request as unauthenticated (HTTP 401 …) — <remote's message + errors>` |
+| Transport failure | `… could not reach the service — <dial/TLS error>` |
+| Body not decodable | `… answered with a body this service could not read: <err>` |
+| System token failed | `… not sent — this service could not obtain its own system access token: <err>` |
+| Bad request/body/client | `… not sent — <reason>` |
+
+`not sent` is the tell that nothing left this pod; anything else means the call
+went out. `describeCall`/`describeStatus` in `request.go` own the wording —
+change it there, not per service.
 
 ## System auth setup (F3) — per-service identity
 
