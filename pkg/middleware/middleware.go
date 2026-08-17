@@ -1,23 +1,56 @@
 package middleware
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/factory24/flow-system/pkg/models"
 	"github.com/factory24/flow-system/pkg/response"
+	"github.com/getsentry/sentry-go"
 	"github.com/labstack/echo/v4"
+	echoMw "github.com/labstack/echo/v4/middleware"
 )
 
 var (
 	AuthorizedPersonas = []string{"vendor", "agent"}
 )
+
+// SentryRecoverConfig wires panics recovered by echo's Recover middleware
+// through to Sentry. sentry.Init() alone (via config.GetSentryConfig) only
+// makes the SDK ready — nothing calls sentry.CaptureException unless
+// something in the panic-recovery path does it explicitly. Use it as:
+//
+//	app.Use(echoMw.RecoverWithConfig(middleware.SentryRecoverConfig()))
+//
+// instead of plain echoMw.Recover(), which recovers and logs locally but
+// never reports anything to Sentry.
+//
+// This only covers panics inside the HTTP handler chain. A panic in a
+// goroutine spawned off a handler (Pulsar consumers, background workers)
+// is NOT caught here — see learns/goroutine-panic-recovery.md for that
+// pattern (defer recover() + sentry.CaptureException at the goroutine
+// boundary itself).
+func SentryRecoverConfig() echoMw.RecoverConfig {
+	return echoMw.RecoverConfig{
+		LogErrorFunc: func(c echo.Context, err error, stack []byte) error {
+			sentry.WithScope(func(scope *sentry.Scope) {
+				scope.SetContext("panic", sentry.Context{"stacktrace": string(stack)})
+				scope.SetTag("uri", c.Request().RequestURI)
+				scope.SetTag("method", c.Request().Method)
+				sentry.CaptureException(err)
+			})
+			return err
+		},
+	}
+}
 
 type EchoMiddleware interface {
 	IsAuthorizedJWT(next echo.HandlerFunc) echo.HandlerFunc
@@ -35,12 +68,61 @@ type EchoMiddleware interface {
 
 type echoMiddleware struct {
 	app *echo.Echo
+
+	oidcMu       sync.Mutex
+	oidcHTTP     *http.Client
+	oidcProvider *oidc.Provider
+	oidcURL      string
 }
 
 func New(app *echo.Echo) EchoMiddleware {
 	return &echoMiddleware{
 		app: app,
 	}
+}
+
+// getOIDCProvider returns a cached *oidc.Provider (and the http.Client bound
+// to it) for keycloakURL, built once and reused across every request.
+//
+// Previously IsAuthorizedJWT/IsClientAuthenticated built a brand new
+// http.Transport (its own connection pool, no reuse) and called
+// oidc.NewProvider — which does a discovery fetch AND lazily fetches JWKS —
+// on EVERY single authenticated request. Under real traffic that meant a
+// fresh TCP handshake to Keycloak (never reusing conns, piling up TIME_WAIT
+// sockets) plus a discovery+JWKS round trip per request, for every protected
+// route on every service sharing this middleware. That's the extra
+// goroutine/socket/memory pressure that showed up as OOMKills and Redis pool
+// exhaustion once this got rolled out platform-wide.
+//
+// A mutex (not sync.Once) is used deliberately: if Keycloak isn't reachable
+// yet on first use, we want the next request to retry, not permanently wedge
+// auth for the pod's lifetime.
+func (middleware *echoMiddleware) getOIDCProvider(ctx context.Context, keycloakURL string) (*oidc.Provider, *http.Client, error) {
+	middleware.oidcMu.Lock()
+	defer middleware.oidcMu.Unlock()
+
+	if middleware.oidcProvider != nil && middleware.oidcURL == keycloakURL {
+		return middleware.oidcProvider, middleware.oidcHTTP, nil
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Timeout:   time.Duration(60) * time.Second,
+		Transport: tr,
+	}
+
+	c := oidc.ClientContext(ctx, client)
+	provider, err := oidc.NewProvider(c, keycloakURL)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	middleware.oidcProvider = provider
+	middleware.oidcHTTP = client
+	middleware.oidcURL = keycloakURL
+	return provider, client, nil
 }
 
 func (middleware *echoMiddleware) GetUserClaims(ctx echo.Context) *models.KeycloakUser {
@@ -213,20 +295,11 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		}
 		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
 
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-
-		client := &http.Client{
-			Timeout:   time.Duration(60) * time.Second,
-			Transport: tr,
-		}
-
-		c := oidc.ClientContext(ctx.Request().Context(), client)
-		provider, err := oidc.NewProvider(c, keycloakURL)
+		provider, client, err := middleware.getOIDCProvider(ctx.Request().Context(), keycloakURL)
 		if err != nil {
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
+		c := oidc.ClientContext(ctx.Request().Context(), client)
 
 		idToken, humanErr := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(c, accessToken)
 		if humanErr != nil {
@@ -295,13 +368,11 @@ func (middleware *echoMiddleware) IsClientAuthenticated(next echo.HandlerFunc) e
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Partner Authentication Required"))
 		}
 
-		tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-		client := &http.Client{Timeout: 60 * time.Second, Transport: tr}
-		c := oidc.ClientContext(ctx.Request().Context(), client)
-		provider, err := oidc.NewProvider(c, keycloakURL)
+		provider, client, err := middleware.getOIDCProvider(ctx.Request().Context(), keycloakURL)
 		if err != nil {
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Auth provider error"))
 		}
+		c := oidc.ClientContext(ctx.Request().Context(), client)
 
 		verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
 		token := strings.TrimPrefix(rawAccessToken, "Bearer ")

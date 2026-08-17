@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"strconv"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -136,8 +138,30 @@ func (db *gormDB) Connect() {
 		log.Printf("WARNING: failed to register GORM OTel tracing plugin: %v", err)
 	}
 
+	// database/sql defaults to an unbounded connection pool (MaxOpenConns=0)
+	// unless explicitly set. Under the tight per-pod CPU/memory limits every
+	// service runs under, an unbounded pool lets a single busy pod exhaust
+	// Postgres's max_connections and starve every other service sharing the
+	// database. Fixed, explicit sizing, overridable per service via env.
+	if sqlDB, err := connection.DB(); err != nil {
+		log.Printf("WARNING: failed to get underlying *sql.DB for pool tuning: %v", err)
+	} else {
+		sqlDB.SetMaxOpenConns(envInt("DB_MAX_OPEN_CONNS", 20))
+		sqlDB.SetMaxIdleConns(envInt("DB_MAX_IDLE_CONNS", 5))
+		sqlDB.SetConnMaxLifetime(30 * time.Minute)
+	}
+
 	db.engine = connection
 	db.MigrateDB()
+}
+
+func envInt(envVar string, def int) int {
+	if v := os.Getenv(envVar); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	return def
 }
 
 func (db *gormDB) MigrateDB() {

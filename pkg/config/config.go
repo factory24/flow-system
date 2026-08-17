@@ -15,6 +15,16 @@ import (
 	"github.com/morkid/paginate"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	// Every service imports this package, so this is the one place to wire
+	// automaxprocs in centrally rather than adding it to ~30 main.go files.
+	// Without it, containers with a CPU *limit* (e.g. 100m) but no GOMAXPROCS
+	// override have the Go runtime see the host's full core count, which
+	// inflates default worker/pool sizing everywhere that scales off
+	// GOMAXPROCS (notably go-redis's default connection pool size). Safe
+	// no-op outside a cgroup-limited container or when GOMAXPROCS is already
+	// set explicitly.
+	_ "go.uber.org/automaxprocs"
 )
 
 type BaseConfig interface {

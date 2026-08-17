@@ -48,10 +48,27 @@ func (c *redisCache) Connect() {
 		}
 	}
 
+	// go-redis defaults PoolSize to 10*GOMAXPROCS. Containers here run with
+	// no GOMAXPROCS override, so the Go runtime sees the *host's* full CPU
+	// count rather than the pod's cgroup CPU limit (often 100m) — every
+	// service was opening a far larger pool than it could ever actually use,
+	// and with ~30 services sharing one redis-master that adds up to
+	// connection pool exhaustion under load. Fixed, explicit sizing instead,
+	// overridable per service via env if a service genuinely needs more.
+	poolSize := 10
+	if v := os.Getenv("REDIS_POOL_SIZE"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			poolSize = parsed
+		}
+	}
+
 	c.client = redis.NewClient(&redis.Options{
-		Addr:     host + ":" + port,
-		Password: password,
-		DB:       db,
+		Addr:         host + ":" + port,
+		Password:     password,
+		DB:           db,
+		PoolSize:     poolSize,
+		MinIdleConns: 2,
+		PoolTimeout:  10 * time.Second,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
