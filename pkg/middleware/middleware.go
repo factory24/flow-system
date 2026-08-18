@@ -97,7 +97,7 @@ func New(app *echo.Echo) EchoMiddleware {
 // A mutex (not sync.Once) is used deliberately: if Keycloak isn't reachable
 // yet on first use, we want the next request to retry, not permanently wedge
 // auth for the pod's lifetime.
-func (middleware *echoMiddleware) getOIDCProvider(ctx context.Context, keycloakURL string) (*oidc.Provider, *http.Client, error) {
+func (middleware *echoMiddleware) getOIDCProvider(keycloakURL string) (*oidc.Provider, *http.Client, error) {
 	middleware.oidcMu.Lock()
 	defer middleware.oidcMu.Unlock()
 
@@ -113,7 +113,13 @@ func (middleware *echoMiddleware) getOIDCProvider(ctx context.Context, keycloakU
 		Transport: tr,
 	}
 
-	c := oidc.ClientContext(ctx, client)
+	// Discovery must not inherit a request context. The provider — and the JWKS
+	// key set hanging off it — is cached for the pod's lifetime, so a caller that
+	// disconnects mid-fetch would otherwise decide auth for every later request.
+	discoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c := oidc.ClientContext(discoveryCtx, client)
 	provider, err := oidc.NewProvider(c, keycloakURL)
 	if err != nil {
 		return nil, nil, err
@@ -295,11 +301,17 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 		}
 		accessToken := strings.TrimPrefix(rawAccessToken, "Bearer ")
 
-		provider, client, err := middleware.getOIDCProvider(ctx.Request().Context(), keycloakURL)
+		provider, client, err := middleware.getOIDCProvider(keycloakURL)
 		if err != nil {
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
-		c := oidc.ClientContext(ctx.Request().Context(), client)
+		// Verification can trigger a JWKS refetch shared by every in-flight request
+		// (go-oidc dedupes them). Binding that to the request context means one
+		// client going away returns "context canceled" to all of them — a 401 for a
+		// perfectly valid token. Use an independent deadline instead.
+		verifyCtx, cancel := context.WithTimeout(oidc.ClientContext(context.Background(), client), 15*time.Second)
+		defer cancel()
+		c := verifyCtx
 
 		idToken, humanErr := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(c, accessToken)
 		if humanErr != nil {
@@ -368,11 +380,13 @@ func (middleware *echoMiddleware) IsClientAuthenticated(next echo.HandlerFunc) e
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Partner Authentication Required"))
 		}
 
-		provider, client, err := middleware.getOIDCProvider(ctx.Request().Context(), keycloakURL)
+		provider, client, err := middleware.getOIDCProvider(keycloakURL)
 		if err != nil {
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Auth provider error"))
 		}
-		c := oidc.ClientContext(ctx.Request().Context(), client)
+		verifyCtx, cancel := context.WithTimeout(oidc.ClientContext(context.Background(), client), 15*time.Second)
+		defer cancel()
+		c := verifyCtx
 
 		verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
 		token := strings.TrimPrefix(rawAccessToken, "Bearer ")
