@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -94,6 +95,31 @@ func New(app *echo.Echo) EchoMiddleware {
 // goroutine/socket/memory pressure that showed up as OOMKills and Redis pool
 // exhaustion once this got rolled out platform-wide.
 //
+// oidcDiscoveryRetries/oidcDiscoveryBackoff bound how hard getOIDCProvider
+// fights a cold pod racing a not-yet-ready egress path before giving up.
+// Prod symptom this exists for: a fresh pod's FIRST authenticated request
+// hits Keycloak discovery while the sidecar/route isn't fully up yet, gets
+// a bare EOF, and — with no retry — that one unlucky request fails auth
+// for the pod's entire lifetime even though a retry a moment later would
+// have succeeded (see learns/user-service-keycloak-discovery-eof-401.md).
+const (
+	oidcDiscoveryRetries = 3
+	oidcDiscoveryBackoff = 500 * time.Millisecond
+)
+
+// ErrOIDCProviderUnavailable wraps a discovery/JWKS failure so callers can
+// tell "Keycloak is unreachable" (infra, retry-able, not the caller's fault)
+// apart from "the token failed verification" (a real auth rejection). Callers
+// must return 503 for the former and 401 for the latter — collapsing both
+// into 401, as this middleware did before, silently logs users out and reads
+// as an auth failure for what is actually a dependency outage.
+type ErrOIDCProviderUnavailable struct{ Cause error }
+
+func (e *ErrOIDCProviderUnavailable) Error() string {
+	return fmt.Sprintf("auth provider temporarily unavailable: %s", e.Cause.Error())
+}
+func (e *ErrOIDCProviderUnavailable) Unwrap() error { return e.Cause }
+
 // A mutex (not sync.Once) is used deliberately: if Keycloak isn't reachable
 // yet on first use, we want the next request to retry, not permanently wedge
 // auth for the pod's lifetime.
@@ -105,30 +131,65 @@ func (middleware *echoMiddleware) getOIDCProvider(keycloakURL string) (*oidc.Pro
 		return middleware.oidcProvider, middleware.oidcHTTP, nil
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	if middleware.oidcHTTP == nil || middleware.oidcURL != keycloakURL {
+		tr := &http.Transport{
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			// Without this the pool holds conns open indefinitely; if the LB/
+			// proxy in front of Keycloak reaps them first, the next reuse
+			// hits a half-closed socket and dies with the same bare EOF this
+			// whole retry loop exists to survive.
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Second,
+		}
+		middleware.oidcHTTP = &http.Client{
+			Timeout:   time.Duration(60) * time.Second,
+			Transport: tr,
+		}
 	}
-	client := &http.Client{
-		Timeout:   time.Duration(60) * time.Second,
-		Transport: tr,
+	client := middleware.oidcHTTP
+
+	var provider *oidc.Provider
+	var err error
+	for attempt := 0; attempt <= oidcDiscoveryRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(oidcDiscoveryBackoff * time.Duration(attempt))
+		}
+
+		// Discovery must not inherit a request context. The provider — and the
+		// JWKS key set hanging off it — is cached for the pod's lifetime, so a
+		// caller that disconnects mid-fetch would otherwise decide auth for
+		// every later request.
+		discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		c := oidc.ClientContext(discoveryCtx, client)
+		provider, err = oidc.NewProvider(c, keycloakURL)
+		cancel()
+		if err == nil {
+			break
+		}
 	}
-
-	// Discovery must not inherit a request context. The provider — and the JWKS
-	// key set hanging off it — is cached for the pod's lifetime, so a caller that
-	// disconnects mid-fetch would otherwise decide auth for every later request.
-	discoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	c := oidc.ClientContext(discoveryCtx, client)
-	provider, err := oidc.NewProvider(c, keycloakURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &ErrOIDCProviderUnavailable{Cause: err}
 	}
 
 	middleware.oidcProvider = provider
-	middleware.oidcHTTP = client
 	middleware.oidcURL = keycloakURL
 	return provider, client, nil
+}
+
+// WarmOIDCProvider pre-fetches and caches the OIDC discovery document/JWKS
+// for keycloakURL so the pod's first real authenticated request doesn't pay
+// (and risk failing) that round trip itself. Call it in a background
+// goroutine right after middleware.New(app) in each service's cmd/main.go —
+// it retries internally via getOIDCProvider and simply logs on failure, so
+// it must never block startup or be treated as fatal. See
+// learns/user-service-keycloak-discovery-eof-401.md.
+func (middleware *echoMiddleware) WarmOIDCProvider(keycloakURL string) {
+	if _, _, err := middleware.getOIDCProvider(keycloakURL); err != nil {
+		fmt.Printf("WarmOIDCProvider: initial OIDC warmup failed, first authenticated request will retry: %s\n", err.Error())
+	}
 }
 
 func (middleware *echoMiddleware) GetUserClaims(ctx echo.Context) *models.KeycloakUser {
@@ -303,6 +364,15 @@ func (middleware *echoMiddleware) IsAuthorizedJWT(next echo.HandlerFunc) echo.Ha
 
 		provider, client, err := middleware.getOIDCProvider(keycloakURL)
 		if err != nil {
+			var unavailable *ErrOIDCProviderUnavailable
+			if errors.As(err, &unavailable) {
+				// Keycloak/discovery is unreachable — this is not a rejected
+				// token, it's a dependency outage. Reporting it as 401 here
+				// silently logs users out and reads as an auth failure for
+				// what is actually infra flakiness (see
+				// learns/user-service-keycloak-discovery-eof-401.md).
+				return ctx.JSON(http.StatusServiceUnavailable, response.NewErrorResponse(err.Error()))
+			}
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse(err.Error()))
 		}
 		// Verification can trigger a JWKS refetch shared by every in-flight request
@@ -382,6 +452,10 @@ func (middleware *echoMiddleware) IsClientAuthenticated(next echo.HandlerFunc) e
 
 		provider, client, err := middleware.getOIDCProvider(keycloakURL)
 		if err != nil {
+			var unavailable *ErrOIDCProviderUnavailable
+			if errors.As(err, &unavailable) {
+				return ctx.JSON(http.StatusServiceUnavailable, response.NewErrorResponse("Auth provider temporarily unavailable"))
+			}
 			return ctx.JSON(http.StatusUnauthorized, response.NewErrorResponse("Auth provider error"))
 		}
 		verifyCtx, cancel := context.WithTimeout(oidc.ClientContext(context.Background(), client), 15*time.Second)
