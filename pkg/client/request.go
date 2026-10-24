@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/factory24/flow-system/pkg/response"
 	"go.opentelemetry.io/otel/attribute"
@@ -45,6 +46,10 @@ type Request struct {
 	// ExpectedStatus is the exact status code required for success.
 	// Zero accepts any 2xx.
 	ExpectedStatus int
+	// CacheTTL > 0 serves a body-less GET from a process-wide cache keyed by URL for
+	// that long, and collapses concurrent identical calls into one. Use it only for
+	// responses that do not depend on who is asking (e.g. a user by ID).
+	CacheTTL time.Duration
 }
 
 // describeCall renders a call the way someone reading a log line or an API
@@ -102,6 +107,13 @@ func describeStatus(code int) string {
 // they name the service being called and what went wrong, rather than the Go
 // function that produced them.
 func Do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse[T], error) {
+	if !cacheable(r) {
+		return do[T](ctx, c, r)
+	}
+	return cachedDo[T](ctx, c, r)
+}
+
+func do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse[T], error) {
 	call := describeCall(r.Method, r.URL)
 
 	if c == nil || c.HTTP == nil {
