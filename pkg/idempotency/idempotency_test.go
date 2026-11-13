@@ -45,3 +45,10 @@ func TestOnceRollsBackClaimOnError(t *testing.T) {
 		t.Fatalf("redelivery did not rerun: %d", n)
 	}
 }
+
+func TestEventKeyStable(t *testing.T) {
+	a := EventKey("t", "x", 1, []byte(`{"a":1}`))
+	if a != EventKey("t", "x", 1, []byte(`{"a":1}`)) || a == EventKey("t", "x", 2, []byte(`{"a":1}`)) {
+		t.Fatal("key not stable or not distinct")
+	}
+}

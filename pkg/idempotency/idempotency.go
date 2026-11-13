@@ -1,6 +1,9 @@
 package idempotency
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -32,4 +35,12 @@ func Once(db *gorm.DB, key, business string, fn func(tx *gorm.DB) error) error {
 		}
 		return fn(tx)
 	})
+}
+
+// EventKey derives a stable key from an event header, for events that carry no id of their own.
+func EventKey(topic, eventType string, timestamp int64, payload []byte) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%d|", topic, eventType, timestamp)
+	h.Write(payload)
+	return eventType + ":" + hex.EncodeToString(h.Sum(nil))[:32]
 }
