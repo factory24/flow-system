@@ -2,6 +2,7 @@
 package authmatrix
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -143,4 +144,22 @@ func Covered(t *testing.T, app *echo.Echo, prefix string, cases []Case) {
 	if len(missing) > 0 {
 		t.Fatalf("routes without a matrix row: %v", missing)
 	}
+}
+
+// Observe sends every case as every tier and returns one "METHOD path tier status" line each, to freeze a first table.
+func Observe(app *echo.Echo, cases []Case) []string {
+	var out []string
+	for _, c := range cases {
+		for _, tier := range Tiers {
+			req := httptest.NewRequest(c.Method, concrete(c.Path), strings.NewReader(c.Body))
+			req.Header.Set("Content-Type", "application/json")
+			if tier != Anonymous {
+				req.Header.Set(header, string(tier))
+			}
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			out = append(out, fmt.Sprintf("%s %s %q %d", c.Method, c.Path, tier, rec.Code))
+		}
+	}
+	return out
 }
