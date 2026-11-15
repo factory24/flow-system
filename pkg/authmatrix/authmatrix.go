@@ -4,6 +4,7 @@ package authmatrix
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -75,6 +76,10 @@ func (s stub) IsAuthorizedPersonas(n echo.HandlerFunc) echo.HandlerFunc {
 	return s.IsAuthorizedJWT(n)
 }
 
+var param = regexp.MustCompile(`/:[A-Za-z_]+`)
+
+func concrete(path string) string { return param.ReplaceAllString(path, "/x") }
+
 // Case is one route with the status each tier must get. Tiers missing from Want default to Default.
 type Case struct {
 	Method, Path string
@@ -99,7 +104,7 @@ func Run(t *testing.T, app *echo.Echo, cases []Case) {
 	for _, c := range cases {
 		for _, tier := range Tiers {
 			body := strings.NewReader(c.Body)
-			req := httptest.NewRequest(c.Method, c.Path, body)
+			req := httptest.NewRequest(c.Method, concrete(c.Path), body)
 			req.Header.Set("Content-Type", "application/json")
 			if tier != Anonymous {
 				req.Header.Set(header, string(tier))

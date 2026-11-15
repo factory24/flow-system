@@ -13,9 +13,11 @@ func TestMatrixDrivesRoutesAsEveryTier(t *testing.T) {
 	ok := func(c echo.Context) error { return c.NoContent(http.StatusOK) }
 	app.GET("/v1/x/open", ok, mw.IsAuthorizedJWT)
 	app.GET("/v1/x/admin", ok, mw.IsRoot)
+	app.GET("/v1/x/item/:id", ok, mw.IsAuthorizedJWT)
 	cases := []Case{
 		{Method: "GET", Path: "/v1/x/open", Default: 200},
 		{Method: "GET", Path: "/v1/x/admin", Default: 403, Want: map[Tier]int{Root: 200}},
+		{Method: "GET", Path: "/v1/x/item/:id", Default: 200},
 	}
 	Run(t, app, cases)
 	Covered(t, app, "/v1/x", cases)
