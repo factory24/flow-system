@@ -10,6 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +37,8 @@ jobs:
 
       - name: Run Tests
         run: go test -v ./...
+        env:
+          ES_TEST_URL: http://localhost:9200
 
       - name: Tag and Release
         uses: mathieudutour/github-tag-action@v6.1
