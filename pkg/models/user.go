@@ -21,4 +21,5 @@ type KeycloakUser struct {
 	Role       string `json:"role"`
 	RoleId     string `json:"roleId"`
 	IsStaff    bool   `json:"isStaff"`
+	PlanState  string `json:"planState"`
 }
