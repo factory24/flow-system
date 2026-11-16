@@ -8,11 +8,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// Rebuilt is the payload of event `search.rebuilt` on topic `search`.
+type Rebuilt struct {
+	Index  string `json:"index"`
+	Alias  string `json:"alias"`
+	Docs   int    `json:"docs"`
+	TookMs int64  `json:"tookMs"`
+	At     string `json:"at"`
+}
+
+// Publisher is the bus surface Rebuild reports through; a Pulsar client satisfies it.
+type Publisher interface {
+	PublishEvent(topic, eventType string, payload any) error
+}
+
+var publisher atomic.Pointer[Publisher]
+
+// SetPublisher makes every successful Rebuild publish `search.rebuilt`; nil switches it off. A publish failure never fails the rebuild.
+func SetPublisher(p Publisher) {
+	if p == nil {
+		publisher.Store(nil)
+		return
+	}
+	publisher.Store(&p)
+}
 
 // Cluster is the minimal HTTP surface Rebuild needs; *HTTPCluster implements it.
 type Cluster interface {
@@ -79,6 +106,7 @@ func notFound(err error) bool {
 // a partial index. When build fails the new index is deleted and the alias is left untouched. A concrete index that still
 // carries the alias name (created before aliases were used) is replaced in the same atomic step.
 func Rebuild(ctx context.Context, c Cluster, index string, mappings json.RawMessage, build func(ctx context.Context, target string) error) error {
+	started := time.Now()
 	target := fmt.Sprintf("%s-%s", index, time.Now().UTC().Format("20060102t150405.000000000"))
 	target = strings.Replace(target, ".", "", 1)
 
@@ -129,7 +157,25 @@ func Rebuild(ctx context.Context, c Cluster, index string, mappings json.RawMess
 			return fmt.Errorf("delete old index %s: %w", o, err)
 		}
 	}
+	announce(ctx, c, index, target, started)
 	return nil
+}
+
+func announce(ctx context.Context, c Cluster, alias, target string, started time.Time) {
+	p := publisher.Load()
+	if p == nil {
+		return
+	}
+	var count struct {
+		Count int `json:"count"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "/"+url.PathEscape(target)+"/_count", nil, &count); err != nil {
+		log.Printf("search.rebuilt: count %s: %v", target, err)
+	}
+	ev := Rebuilt{Index: target, Alias: alias, Docs: count.Count, TookMs: time.Since(started).Milliseconds(), At: time.Now().UTC().Format(time.RFC3339)}
+	if err := (*p).PublishEvent("search", "search.rebuilt", ev); err != nil {
+		log.Printf("search.rebuilt for %s not published: %v", alias, err)
+	}
 }
 
 // current returns the indices the alias serves, and whether `<index>` is itself a concrete index.

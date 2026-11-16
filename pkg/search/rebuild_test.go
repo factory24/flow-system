@@ -74,6 +74,9 @@ func (f *fakeCluster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				f.aliases[v.Alias][v.Index] = true
 			}
 		}
+	case r.Method == http.MethodGet && strings.HasSuffix(p, "/_count"):
+		_, _ = w.Write([]byte(`{"count":7}`))
+		return
 	case r.Method == http.MethodGet:
 		out := map[string]any{}
 		if f.indices[p] {
@@ -201,5 +204,38 @@ func TestRebuildAgainstElasticsearch(t *testing.T) {
 	}
 	if got := count(); got != 3 {
 		t.Fatalf("count after swap = %d, want 3", got)
+	}
+}
+
+type fakeBus struct {
+	topic, kind string
+	payload     any
+	n           int
+}
+
+func (b *fakeBus) PublishEvent(topic, kind string, payload any) error {
+	b.topic, b.kind, b.payload = topic, kind, payload
+	b.n++
+	return nil
+}
+
+func TestRebuildPublishesSearchRebuilt(t *testing.T) {
+	f := newFake()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	bus := &fakeBus{}
+	SetPublisher(bus)
+	defer SetPublisher(nil)
+	c := &HTTPCluster{URL: srv.URL}
+	if err := Rebuild(context.Background(), c, "v-things", nil, func(context.Context, string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	ev, ok := bus.payload.(Rebuilt)
+	if bus.n != 1 || bus.topic != "search" || bus.kind != "search.rebuilt" || !ok || ev.Alias != "v-things" || ev.Docs != 7 || !strings.HasPrefix(ev.Index, "v-things-") || ev.At == "" {
+		t.Fatalf("bus %+v payload %+v", bus, bus.payload)
+	}
+	_ = Rebuild(context.Background(), c, "v-things", nil, func(context.Context, string) error { return errors.New("boom") })
+	if bus.n != 1 {
+		t.Fatalf("a failed rebuild published: %d", bus.n)
 	}
 }
