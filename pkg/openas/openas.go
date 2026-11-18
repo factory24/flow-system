@@ -93,18 +93,31 @@ func (v *Verifier) Verify(ctx echo.Context, user *models.KeycloakUser, business 
 }
 
 var (
-	once    sync.Once
+	mu      sync.Mutex
 	current *Verifier
 )
 
-// Verify checks with a process-wide Verifier that forwards the caller's own token to the user service (CLIENT.USER).
-func Verify(ctx echo.Context, user *models.KeycloakUser, business string) error {
-	once.Do(func() {
+func shared() *Verifier {
+	mu.Lock()
+	defer mu.Unlock()
+	if current == nil {
 		base := os.Getenv("CLIENT.USER")
 		if base == "" {
 			base = "http://user-service:8080/v1"
 		}
 		current = New(client.New(nil), base)
-	})
-	return current.Verify(ctx, user, business)
+	}
+	return current
+}
+
+// Verify checks with a process-wide Verifier that forwards the caller's own token to the user service (CLIENT.USER).
+func Verify(ctx echo.Context, user *models.KeycloakUser, business string) error {
+	return shared().Verify(ctx, user, business)
+}
+
+// Use replaces the process-wide Verifier; nil restores the default. Tests use it through openastest.
+func Use(v *Verifier) {
+	mu.Lock()
+	current = v
+	mu.Unlock()
 }
