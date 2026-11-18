@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/factory24/flow-system/pkg/observe"
 	"github.com/factory24/flow-system/pkg/response"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -141,8 +142,13 @@ func do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 		return nil, fmt.Errorf("%s: not sent — %w", call, err)
 	}
 
+	if id := observe.RequestID(ctx); id != "" {
+		req.Header.Set(observe.RequestIDHeader, id)
+	}
+
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		observe.OutboundError(req.URL.Host)
 		return nil, fmt.Errorf("%s: could not reach the service — %w", call, err)
 	}
 	defer resp.Body.Close()
@@ -151,6 +157,7 @@ func do[T any](ctx context.Context, c *Client, r Request) (*response.ApiResponse
 		(r.ExpectedStatus == 0 && resp.StatusCode >= 200 && resp.StatusCode < 300)
 
 	if !ok {
+		observe.OutboundError(req.URL.Host)
 		// otelhttp's own client span already ended by this point (it closes
 		// synchronously inside RoundTrip, before Do ever sees the response),
 		// and it only reflects transport-level failures anyway — a 4xx/5xx is
