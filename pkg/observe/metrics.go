@@ -84,18 +84,20 @@ func ConsumerNack(topic string) { Count("consumer_nacks_total", "topic", topic) 
 // OutboundError records a failed call to target.
 func OutboundError(target string) { Count("outbound_call_errors_total", "target", target) }
 
-func write(w io.Writer) {
+func write(out io.Writer) {
+	var w strings.Builder
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
+	defer func() { _, _ = io.WriteString(out, w.String()) }()
 	names := make([]string, 0, len(reg.counters))
 	for n := range reg.counters {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		fmt.Fprintf(w, "# TYPE %s counter\n", n)
+		fmt.Fprintf(&w, "# TYPE %s counter\n", n)
 		for _, l := range sortedKeys(reg.counters[n]) {
-			fmt.Fprintf(w, "%s%s %d\n", n, braces(l), reg.counters[n][l])
+			fmt.Fprintf(&w, "%s%s %d\n", n, braces(l), reg.counters[n][l])
 		}
 	}
 	names = names[:0]
@@ -104,7 +106,7 @@ func write(w io.Writer) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		fmt.Fprintf(w, "# TYPE %s histogram\n", n)
+		fmt.Fprintf(&w, "# TYPE %s histogram\n", n)
 		keys := make([]string, 0, len(reg.hists[n]))
 		for k := range reg.hists[n] {
 			keys = append(keys, k)
@@ -117,10 +119,10 @@ func write(w io.Writer) {
 				join = l + ","
 			}
 			for i, b := range latencyBuckets {
-				fmt.Fprintf(w, "%s_bucket{%sle=\"%g\"} %d\n", n, join, b, h.counts[i])
+				fmt.Fprintf(&w, "%s_bucket{%sle=\"%g\"} %d\n", n, join, b, h.counts[i])
 			}
-			fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", n, join, h.n)
-			fmt.Fprintf(w, "%s_sum%s %g\n%s_count%s %d\n", n, braces(l), h.sum, n, braces(l), h.n)
+			fmt.Fprintf(&w, "%s_bucket{%sle=\"+Inf\"} %d\n", n, join, h.n)
+			fmt.Fprintf(&w, "%s_sum%s %g\n%s_count%s %d\n", n, braces(l), h.sum, n, braces(l), h.n)
 		}
 	}
 }
